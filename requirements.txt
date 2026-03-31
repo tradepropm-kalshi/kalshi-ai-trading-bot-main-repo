@@ -1,0 +1,23 @@
+# Core RyanFrigo dependencies (preserved)
+aiosqlite>=0.20.0
+httpx>=0.27.0
+cryptography>=42.0.0
+pydantic>=2.0.0
+structlog>=24.0.0
+plotly>=5.0.0
+pandas>=2.0.0
+numpy>=1.26.0
+
+# Dashboard (updated to compatible version)
+streamlit>=1.42.0
+
+# xAI / Grok integration (critical for your AI ensemble and phase decisions)
+xai-sdk
+
+# Kalshi & trading helpers
+ratelimit>=0.9.0
+websockets>=12.0
+watchdog>=4.0.0
+
+# Optional but recommended for robustness (no breaking changes)
+python-dotenv>=1.0.0
