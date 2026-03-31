@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Beast Mode Trading Bot — WITH BIBLE PHASE PROFIT MODE
-Original RyanFrigo pipeline and structure fully preserved.
 """
 
 import asyncio
@@ -10,7 +9,6 @@ import signal
 import sys
 from datetime import datetime
 
-# Force clean UTF-8 output on Windows (eliminates ALL charmap/UnicodeEncodeError spam)
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
@@ -23,11 +21,7 @@ from src.utils.logging_setup import setup_logging, get_trading_logger
 from src.utils.database import DatabaseManager
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
-from src.clients.model_router import ModelRouter
 from src.config.settings import settings
-
-# Keep all your original imports and structures
-from src.strategies.unified_trading_system import run_unified_trading_system, TradingSystemConfig
 from beast_mode_dashboard import BeastModeDashboard
 
 
@@ -67,7 +61,6 @@ class BeastModeBot:
 
         kalshi_client = KalshiClient()
         xai_client = XAIClient(db_manager=db_manager)
-        self.model_router = ModelRouter(xai_client=xai_client, db_manager=db_manager)
 
         ingestion_task = asyncio.create_task(self._run_market_ingestion(db_manager, kalshi_client))
         tasks = [
@@ -90,9 +83,10 @@ class BeastModeBot:
         try:
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
-            if hasattr(self, 'model_router'):
-                await self.model_router.close()
-            await kalshi_client.close()
+            try:
+                await kalshi_client.close()
+            except Exception:
+                pass
             self.logger.info("Beast Mode Bot shut down gracefully")
 
     async def _ensure_database_ready(self, db_manager: DatabaseManager):
@@ -102,8 +96,7 @@ class BeastModeBot:
     async def _run_market_ingestion(self, db_manager: DatabaseManager, kalshi_client: KalshiClient):
         while not self.shutdown_event.is_set():
             try:
-                market_queue = asyncio.Queue()
-                await run_ingestion(db_manager, market_queue)
+                await run_ingestion(db_manager)
                 await asyncio.sleep(300)
             except Exception as e:
                 self.logger.error(f"Error in market ingestion: {e}")
@@ -115,7 +108,7 @@ class BeastModeBot:
             try:
                 cycle_count += 1
                 self.logger.info(f"Starting Beast Mode Trading Cycle #{cycle_count}")
-                results = await run_trading_job()
+                await run_trading_job()
                 await asyncio.sleep(60)
             except Exception as e:
                 self.logger.error(f"Error in trading cycle #{cycle_count}: {e}")

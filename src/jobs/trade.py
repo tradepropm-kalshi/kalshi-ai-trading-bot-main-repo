@@ -1,20 +1,69 @@
 """
-Trade Job — Central entry point for trading cycles (original RyanFrigo pipeline preserved)
+Trade Job — Entry point for executing unified trading
 """
 
 import asyncio
-from src.utils.logging_setup import get_trading_logger
-from src.strategies.unified_trading_system import run_unified_trading_system
+from typing import Dict
+
+from src.utils.database import DatabaseManager
+from src.clients.kalshi_client import KalshiClient
+from src.clients.xai_client import XAIClient
 from src.config.settings import settings
+from src.utils.logging_setup import get_trading_logger
+from src.strategies.unified_trading_system import run_unified_trading_system, TradingSystemConfig
 
-async def run_trading_job():
-    logger = get_trading_logger("trading_job")
-    logger.info("Starting Enhanced Trading Job - Beast Mode Activated")
 
-    if settings.trading.phase_mode_enabled:
-        logger.info("PHASE MODE ACTIVE → sizing against $100 base + current phase profit")
+async def _initialize_components():
+    db_manager = DatabaseManager()
+    await db_manager.initialize()
 
-    results = await run_unified_trading_system()
+    kalshi_client = KalshiClient()
+    xai_client = XAIClient(db_manager=db_manager)
 
-    logger.info("Unified trading strategy completed successfully")
-    return results
+    config = TradingSystemConfig()
+
+    return db_manager, kalshi_client, xai_client, config
+
+
+async def _run_unified_trade_cycle(db_manager: DatabaseManager, kalshi_client: KalshiClient, xai_client: XAIClient, config: TradingSystemConfig) -> Dict:
+    logger = get_trading_logger("trade_cycle")
+    try:
+        results = await run_unified_trading_system(
+            db_manager=db_manager,
+            kalshi_client=kalshi_client,
+            xai_client=xai_client,
+            config=config
+        )
+        logger.info(f"Unified trade cycle completed — {results.total_positions} positions, ${results.total_capital_used:.2f} capital used")
+        return results
+    except Exception as e:
+        logger.error(f"Error in unified trade cycle: {e}")
+        return {}
+
+
+async def run_trading_job() -> Dict:
+    logger = get_trading_logger("trade_job")
+    logger.info("Starting trade job")
+
+    try:
+        db_manager, kalshi_client, xai_client, config = await _initialize_components()
+
+        results = await _run_unified_trade_cycle(db_manager, kalshi_client, xai_client, config)
+
+        logger.info("Trade job completed successfully")
+        return results
+
+    except Exception as e:
+        logger.error(f"Critical error in trade job: {e}")
+        return {}
+
+    finally:
+        try:
+            if 'kalshi_client' in locals():
+                await kalshi_client.close()
+        except Exception:
+            pass
+
+
+async def run_trading_job_async():
+    return await run_trading_job()
