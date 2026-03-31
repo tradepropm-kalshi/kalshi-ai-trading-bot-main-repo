@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Beast Mode Trading Bot — WITH BIBLE PHASE PROFIT MODE
-$100 base → $2,500 realized profit → secure $2,400 + reset to $100
-Clean Windows console — no more Unicode spam
+Original RyanFrigo pipeline preserved: ingest → decide → execute → track → evaluate
+$100 base capital until +$2,500 realized profit, then secure exactly $2,400 and reset.
+Clean Windows console — no Unicode spam.
 """
 
 import asyncio
@@ -11,7 +12,7 @@ import signal
 import sys
 from datetime import datetime
 
-# === FORCE CLEAN OUTPUT ON WINDOWS (eliminates ALL charmap/Unicode errors) ===
+# Force clean UTF-8 output on Windows (eliminates ALL charmap/UnicodeEncodeError spam)
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
@@ -27,7 +28,7 @@ from src.clients.xai_client import XAIClient
 from src.clients.model_router import ModelRouter
 from src.config.settings import settings
 
-# Keep all your original imports
+# Preserve all original RyanFrigo imports
 from src.strategies.unified_trading_system import run_unified_trading_system, TradingSystemConfig
 from beast_mode_dashboard import BeastModeDashboard
 
@@ -39,20 +40,16 @@ class BeastModeBot:
         self.phase_mode = phase_mode
         self.logger = get_trading_logger("beast_mode_bot")
         self.shutdown_event = asyncio.Event()
-        
+
+        # Original RyanFrigo settings application preserved
         settings.trading.live_trading_enabled = live_mode
         settings.trading.paper_trading_mode = not live_mode
         settings.trading.phase_mode_enabled = phase_mode
-        
+
         # Clean text banners (no emojis)
-        self.logger.info(
-            f"Beast Mode Bot initialized - Mode: {'LIVE' if live_mode else 'PAPER'} | "
-            f"Phase Mode: {'ENABLED' if phase_mode else 'DISABLED'}"
-        )
-        
+        self.logger.info(f"Beast Mode Bot initialized - Mode: {'LIVE' if live_mode else 'PAPER'} | Phase Mode: {'ENABLED' if phase_mode else 'DISABLED'}")
         if phase_mode:
             self.logger.info("PHASE MODE ACTIVE → $100 base capital | $2,500 profit target | $2,400 secure per chunk")
-        
         if live_mode:
             self.logger.warning("LIVE TRADING MODE ENABLED - REAL MONEY WILL BE USED")
         else:
@@ -68,14 +65,14 @@ class BeastModeBot:
         self.logger.info(f"Trading Mode: {'LIVE' if self.live_mode else 'PAPER'}")
         if self.phase_mode:
             self.logger.info("PHASE PROFIT MODE: $100 base → +$2,500 → secure $2,400 + reset")
-        
+
         db_manager = DatabaseManager()
         await self._ensure_database_ready(db_manager)
-        
+
         kalshi_client = KalshiClient()
         xai_client = XAIClient(db_manager=db_manager)
         self.model_router = ModelRouter(xai_client=xai_client, db_manager=db_manager)
-        
+
         ingestion_task = asyncio.create_task(self._run_market_ingestion(db_manager, kalshi_client))
         tasks = [
             ingestion_task,
@@ -83,17 +80,17 @@ class BeastModeBot:
             asyncio.create_task(self._run_position_tracking(db_manager, kalshi_client)),
             asyncio.create_task(self._run_performance_evaluation(db_manager))
         ]
-        
+
         def signal_handler():
             self.logger.info("Shutdown signal received")
             self.shutdown_event.set()
             for task in tasks:
                 if not task.done():
                     task.cancel()
-        
+
         for sig in [signal.SIGINT, signal.SIGTERM]:
             signal.signal(sig, lambda s, f: signal_handler())
-        
+
         try:
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
@@ -162,11 +159,10 @@ async def main():
     parser.add_argument("--dashboard", action="store_true", help="Run in live dashboard mode")
     parser.add_argument("--phase", action="store_true", help="Enable PHASE PROFIT MODE ($100 → +$2,500 → secure $2,400 + reset)")
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
-    
+
     args = parser.parse_args()
-    
     setup_logging(log_level=args.log_level)
-    
+
     bot = BeastModeBot(
         live_mode=args.live,
         dashboard_mode=args.dashboard,
