@@ -14,7 +14,6 @@ async def run_trading_job():
     if settings.trading.phase_mode_enabled:
         logger.info("PHASE MODE ACTIVE → sizing against $100 base + current phase profit")
 
-    # Original RyanFrigo unified strategy call preserved
     results = await run_unified_trading_system()
 
     logger.info("Unified trading strategy completed successfully")

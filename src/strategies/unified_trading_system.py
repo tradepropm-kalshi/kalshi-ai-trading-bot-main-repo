@@ -1,6 +1,5 @@
 """
 Unified Advanced Trading System - The Beast Mode — NOW WITH PHASE PROFIT MODE
-Original RyanFrigo structure preserved: class, async_initialize, parallel strategy execution, TradingSystemResults
 """
 
 import asyncio
@@ -18,7 +17,6 @@ from src.utils.logging_setup import get_trading_logger
 from src.strategies.market_making import AdvancedMarketMaker, run_market_making_strategy
 from src.strategies.portfolio_optimization import AdvancedPortfolioOptimizer, run_portfolio_optimization
 from src.strategies.quick_flip_scalping import run_quick_flip_strategy, QuickFlipConfig
-
 
 @dataclass
 class TradingSystemConfig:
@@ -39,7 +37,6 @@ class TradingSystemConfig:
     profit_taking_threshold: float = 0.25
     loss_cutting_threshold: float = 0.10
 
-
 @dataclass
 class TradingSystemResults:
     market_making_orders: int = 0
@@ -58,7 +55,6 @@ class TradingSystemResults:
     total_positions: int = 0
     capital_efficiency: float = 0.0
     expected_annual_return: float = 0.0
-
 
 class UnifiedAdvancedTradingSystem:
     def __init__(
@@ -113,7 +109,6 @@ class UnifiedAdvancedTradingSystem:
     async def execute_unified_trading_strategy(self) -> TradingSystemResults:
         results = TradingSystemResults()
         try:
-            # Run the three strategies in parallel (original RyanFrigo pattern preserved)
             mm_task = asyncio.create_task(run_market_making_strategy(
                 self.db_manager, self.kalshi_client, self.xai_client))
             po_task = asyncio.create_task(run_portfolio_optimization(
@@ -123,7 +118,6 @@ class UnifiedAdvancedTradingSystem:
            
             mm_results, po_results, qf_results = await asyncio.gather(mm_task, po_task, qf_task)
            
-            # Aggregate results (original structure preserved)
             results.market_making_orders = mm_results.get('orders_placed', 0)
             results.market_making_exposure = mm_results.get('total_exposure', 0.0)
             results.market_making_expected_profit = mm_results.get('expected_profit', 0.0)

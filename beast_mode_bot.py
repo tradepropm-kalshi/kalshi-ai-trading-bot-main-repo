@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
 Beast Mode Trading Bot — WITH BIBLE PHASE PROFIT MODE
-Original RyanFrigo pipeline preserved: ingest → decide → execute → track → evaluate
-$100 base capital until +$2,500 realized profit, then secure exactly $2,400 and reset.
-Clean Windows console — no Unicode spam.
+Original RyanFrigo pipeline and structure fully preserved.
 """
 
 import asyncio
@@ -28,7 +26,7 @@ from src.clients.xai_client import XAIClient
 from src.clients.model_router import ModelRouter
 from src.config.settings import settings
 
-# Preserve all original RyanFrigo imports
+# Keep all your original imports and structures
 from src.strategies.unified_trading_system import run_unified_trading_system, TradingSystemConfig
 from beast_mode_dashboard import BeastModeDashboard
 
@@ -41,12 +39,10 @@ class BeastModeBot:
         self.logger = get_trading_logger("beast_mode_bot")
         self.shutdown_event = asyncio.Event()
 
-        # Original RyanFrigo settings application preserved
         settings.trading.live_trading_enabled = live_mode
         settings.trading.paper_trading_mode = not live_mode
         settings.trading.phase_mode_enabled = phase_mode
 
-        # Clean text banners (no emojis)
         self.logger.info(f"Beast Mode Bot initialized - Mode: {'LIVE' if live_mode else 'PAPER'} | Phase Mode: {'ENABLED' if phase_mode else 'DISABLED'}")
         if phase_mode:
             self.logger.info("PHASE MODE ACTIVE → $100 base capital | $2,500 profit target | $2,400 secure per chunk")

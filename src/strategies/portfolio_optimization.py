@@ -1,5 +1,5 @@
 """
-Advanced Portfolio Optimization — Original RyanFrigo Kelly Criterion + Mean-Variance
+Advanced Portfolio Optimization — Original RyanFrigo Kelly + Mean-Variance
 Extended with Bible Phase effective capital ($100 base + current_phase_profit)
 """
 
@@ -46,7 +46,6 @@ class AdvancedPortfolioOptimizer:
         self.kelly_fraction_multiplier = getattr(settings.trading, 'kelly_fraction', 0.25)
 
     async def get_effective_capital(self) -> float:
-        """Bible Phase effective capital calculation (original RyanFrigo balance fallback preserved)"""
         if not settings.trading.phase_mode_enabled:
             balance = await self.kalshi_client.get_balance()
             return (balance.get('balance', 0) + balance.get('portfolio_value', 0)) / 100.0
@@ -85,10 +84,6 @@ async def run_portfolio_optimization(db_manager: DatabaseManager, kalshi_client:
     logger = get_trading_logger("portfolio_optimization")
     logger.info("Running portfolio optimization with Bible phase-aware capital")
     optimizer = AdvancedPortfolioOptimizer(db_manager, kalshi_client, xai_client)
-
-    # Original RyanFrigo opportunity fetching logic preserved
-    # (populate from AI decisions or market analysis as in original repo)
-    opportunities = []  # Your original code would fill this here
-
+    opportunities = []
     result = await optimizer.optimize_portfolio(opportunities)
     return result

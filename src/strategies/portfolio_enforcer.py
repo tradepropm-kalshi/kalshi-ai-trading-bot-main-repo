@@ -34,9 +34,8 @@ class PortfolioEnforcer:
         await self._update_effective_capital()
 
     async def _update_effective_capital(self) -> None:
-        """Bible Phase effective capital calculation (original RyanFrigo balance fallback preserved)"""
         if not settings.trading.phase_mode_enabled:
-            self._effective_capital = 1000.0  # Original RyanFrigo fallback
+            self._effective_capital = 1000.0
             return
 
         phase = await self.db_manager.get_phase_state()
