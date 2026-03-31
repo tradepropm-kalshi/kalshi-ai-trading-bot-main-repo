@@ -1,7 +1,5 @@
 """
 Portfolio Enforcer — Risk & Allocation Guardrails
-Original RyanFrigo design preserved exactly
-NOW WITH BIBLE PHASE CAPITAL HELPERS
 """
 
 from typing import Dict, List, Optional
@@ -26,7 +24,6 @@ class PortfolioEnforcer:
         self.logger = get_trading_logger("portfolio_enforcer")
 
     async def get_effective_capital(self) -> float:
-        """Helper: Returns Bible phase effective capital or fallback"""
         if not getattr(settings.trading, 'phase_mode_enabled', False):
             return 100.0
 
@@ -41,7 +38,6 @@ class PortfolioEnforcer:
             return getattr(settings.trading, 'phase_base_capital', 100.0)
 
     def calculate_max_position_size(self, effective_capital: float, category_score: Optional[CategoryScore] = None) -> float:
-        """Helper: Phase-aware max position size"""
         base_max = getattr(settings.trading, 'max_single_position', 0.15)
         if category_score:
             base_max = min(base_max, category_score.max_allocation)
@@ -65,7 +61,6 @@ class PortfolioEnforcer:
                 "effective_capital": effective_capital
             }
 
-        # Original RyanFrigo category scoring logic preserved exactly
         category_score = await self._get_category_score(category)
         if category_score and size > category_score.max_allocation * effective_capital:
             self.logger.warning(f"BLOCKED: Category {category} exposure limit hit")
@@ -75,7 +70,6 @@ class PortfolioEnforcer:
                 "effective_capital": effective_capital
             }
 
-        # Original correlation / volatility guard preserved exactly
         current_exposure = await self._get_current_exposure()
         if current_exposure + size > effective_capital * 0.70:
             self.logger.warning(f"BLOCKED: Portfolio correlation exposure would exceed limit")
@@ -93,7 +87,6 @@ class PortfolioEnforcer:
         }
 
     async def _get_category_score(self, category: str) -> Optional[CategoryScore]:
-        # Original RyanFrigo category scoring preserved exactly
         scores = {
             "high_confidence": CategoryScore("high_confidence", 0.85, 0.20, 0.0),
             "medium": CategoryScore("medium", 0.60, 0.15, 0.0),
@@ -103,7 +96,6 @@ class PortfolioEnforcer:
         return scores.get(category.lower(), scores["default"])
 
     async def _get_current_exposure(self) -> float:
-        # Original exposure calculation preserved exactly
         try:
             positions = await self.db_manager.get_open_positions()
             return sum(p.get("size", 0) for p in positions)
@@ -111,7 +103,6 @@ class PortfolioEnforcer:
             return 0.0
 
     async def enforce_portfolio(self, proposed_positions: List[Dict]) -> List[Dict]:
-        """Original enforcement loop preserved exactly with phase helpers"""
         effective_capital = await self.get_effective_capital()
         approved = []
 
