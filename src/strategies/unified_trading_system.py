@@ -109,6 +109,7 @@ class UnifiedAdvancedTradingSystem:
     async def execute_unified_trading_strategy(self) -> TradingSystemResults:
         results = TradingSystemResults()
         try:
+            # Run the three strategies in parallel (original structure preserved)
             mm_task = asyncio.create_task(run_market_making_strategy(
                 self.db_manager, self.kalshi_client, self.xai_client))
             po_task = asyncio.create_task(run_portfolio_optimization(
@@ -118,6 +119,7 @@ class UnifiedAdvancedTradingSystem:
            
             mm_results, po_results, qf_results = await asyncio.gather(mm_task, po_task, qf_task)
            
+            # Aggregate results (original structure preserved)
             results.market_making_orders = mm_results.get('orders_placed', 0)
             results.market_making_exposure = mm_results.get('total_exposure', 0.0)
             results.market_making_expected_profit = mm_results.get('expected_profit', 0.0)
