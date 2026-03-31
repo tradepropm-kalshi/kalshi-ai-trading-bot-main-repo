@@ -38,7 +38,7 @@ async def _run_unified_trade_cycle(db_manager: DatabaseManager, kalshi_client: K
         return results
     except Exception as e:
         logger.error(f"Error in unified trade cycle: {e}")
-        return {}
+        return {"total_positions": 0, "total_capital_used": 0.0}
 
 
 async def run_trading_job() -> Dict:
@@ -55,7 +55,7 @@ async def run_trading_job() -> Dict:
 
     except Exception as e:
         logger.error(f"Critical error in trade job: {e}")
-        return {}
+        return {"total_positions": 0, "total_capital_used": 0.0}
 
     finally:
         try:
