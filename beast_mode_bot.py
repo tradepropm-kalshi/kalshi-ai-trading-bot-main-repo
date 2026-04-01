@@ -39,18 +39,15 @@ from src.utils.database import DatabaseManager
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
 from src.config.settings import settings
-from beast_mode_dashboard import BeastModeDashboard
 
 
 class BeastModeBot:
     def __init__(
         self,
         live_mode: bool = False,
-        dashboard_mode: bool = False,
         phase_mode: bool = False,
     ):
         self.live_mode = live_mode
-        self.dashboard_mode = dashboard_mode
         self.phase_mode = phase_mode
         self.logger = get_trading_logger("beast_mode_bot")
         self.shutdown_event = asyncio.Event()
@@ -73,13 +70,6 @@ class BeastModeBot:
             self.logger.warning("LIVE TRADING MODE ENABLED — REAL MONEY WILL BE USED")
         else:
             self.logger.info("Paper trading mode — orders will be simulated")
-
-    # ── Dashboard mode ────────────────────────────────────────────────────────
-
-    async def run_dashboard_mode(self):
-        self.logger.info("Starting Beast Mode Dashboard")
-        dashboard = BeastModeDashboard()
-        await dashboard.show_live_dashboard()
 
     # ── Trading mode ──────────────────────────────────────────────────────────
 
@@ -259,10 +249,7 @@ class BeastModeBot:
     # ── Entry point ───────────────────────────────────────────────────────────
 
     async def run(self):
-        if self.dashboard_mode:
-            await self.run_dashboard_mode()
-        else:
-            await self.run_trading_mode()
+        await self.run_trading_mode()
 
 
 async def main():
@@ -271,7 +258,6 @@ async def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--live",      action="store_true", help="Run in LIVE trading mode")
-    parser.add_argument("--dashboard", action="store_true", help="Run in live dashboard mode")
     parser.add_argument(
         "--phase",
         action="store_true",
@@ -289,7 +275,6 @@ async def main():
 
     bot = BeastModeBot(
         live_mode=args.live,
-        dashboard_mode=args.dashboard,
         phase_mode=args.phase,
     )
     await bot.run()
