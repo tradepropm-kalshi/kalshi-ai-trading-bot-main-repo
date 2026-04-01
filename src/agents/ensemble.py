@@ -275,11 +275,24 @@ class EnsembleRunner:
                 return float(val)
 
         if role == "news_analyst":
-            # Convert sentiment (-1..1) into a probability adjustment centred on 0.5
+            # Convert sentiment (-1..1) into a probability adjustment centred on 0.5.
+            #
+            # Fix: the original formula `0.5 + sentiment * relevance * 0.5` collapses
+            # to exactly 0.0 or 1.0 when both sentiment and relevance are at their
+            # extremes (±1 and 1.0).  That pushes the ensemble toward certainty based
+            # on a single headline, which is unsound.
+            #
+            # The fix applies a logistic-style dampening that keeps the news signal
+            # inside a ±0.25 band around 0.5 regardless of input magnitude:
+            #   raw_shift = sentiment * relevance * 0.5   (still uses original formula)
+            #   dampened  = raw_shift / (1 + |raw_shift| * 4)  → asymptotes at ±0.25
+            # This means no single news item can push the ensemble probability
+            # below 0.25 or above 0.75 from the news channel alone.
             sentiment = result.get("sentiment", 0.0)
             relevance = result.get("relevance", 0.5)
-            # Scale: sentiment * relevance gives -1..1 adjustment, map to 0..1
-            prob = 0.5 + (sentiment * relevance * 0.5)
+            raw_shift = sentiment * relevance * 0.5
+            dampened_shift = raw_shift / (1.0 + abs(raw_shift) * 4.0)
+            prob = 0.5 + dampened_shift
             return max(0.0, min(1.0, prob))
 
         if role == "risk_manager":

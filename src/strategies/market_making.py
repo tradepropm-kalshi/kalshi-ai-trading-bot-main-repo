@@ -1,24 +1,32 @@
 """
-Market Making Strategy - Advanced Liquidity Provision
+Market Making Strategy — Advanced Liquidity Provision
 
-This strategy implements sophisticated market making by:
-1. Placing limit orders on both YES and NO sides
-2. Calculating optimal spreads based on volatility and edge
-3. Managing inventory risk and position sizing
-4. Rebalancing orders based on market conditions
+Fixes applied
+─────────────
+1. Spread/bid-ask calculation was inverted: bids were priced ABOVE the current
+   market, guaranteeing immediate fills and no captured spread.  The logic now
+   prices the YES-bid BELOW mid and the NO-bid so that YES_bid + NO_bid < $1.00,
+   creating a locked profit whenever both sides fill.
 
-Key advantages:
-- Profits from spreads without directional risk
-- Doesn't tie up capital like taking positions
-- Provides liquidity while capturing edge
-- Scales efficiently across many markets
+2. Both a YES BUY order and a NO BUY order are placed per market.
+   On Kalshi you cannot place a raw "sell limit" without owning the contracts,
+   so the canonical synthetic-spread approach is:
+     YES_bid = mid − half_spread   (buy YES below fair value)
+     NO_bid  = (1 − mid) − half_spread  (buy NO below its fair value)
+   If both fill, total cost = YES_bid + NO_bid < $1.00 guaranteed payout → profit.
+
+3. _update_order is fully implemented: cancels the stale order via the API and
+   places a fresh limit order at the recalculated optimal price.
+
+4. place_order calls pass the params dict directly (not **-unpacked) to match
+   KalshiClient.place_order(order_params: Dict).
 """
 
 import asyncio
-import logging
+import uuid
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, NamedTuple
-from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
 import numpy as np
 
 from src.clients.kalshi_client import KalshiClient
@@ -30,641 +38,556 @@ from src.utils.logging_setup import get_trading_logger
 
 @dataclass
 class LimitOrder:
-    """Represents a limit order in the market making strategy."""
     market_id: str
-    side: str  # "YES" or "NO"
-    price: float  # Price in dollars (0.00-1.00)
+    side: str           # "YES" or "NO"
+    price: float        # dollars (0.01 – 0.99)
     quantity: int
     order_type: str = "limit"
-    status: str = "pending"  # pending, placed, filled, cancelled
+    status: str = "pending"
     order_id: Optional[str] = None
     placed_at: Optional[datetime] = None
     expected_profit: float = 0.0
-    
-    
+
+
 @dataclass
 class MarketMakingOpportunity:
-    """Represents a market making opportunity with calculated spreads."""
     market_id: str
     market_title: str
-    current_yes_price: float
-    current_no_price: float
+    current_yes_mid: float          # mid-price of YES
+    current_no_mid: float           # mid-price of NO
     ai_predicted_prob: float
     ai_confidence: float
-    
-    # Calculated optimal prices
-    optimal_yes_bid: float
-    optimal_yes_ask: float
-    optimal_no_bid: float
-    optimal_no_ask: float
-    
-    # Expected profits
-    yes_spread_profit: float
-    no_spread_profit: float
-    total_expected_profit: float
-    
-    # Risk metrics
+
+    # Optimal bid prices (both are BUY orders)
+    optimal_yes_bid: float          # price to BUY YES (below mid)
+    optimal_no_bid: float           # price to BUY NO (below no-mid)
+
+    # Expected spread-locked profit if both sides fill
+    locked_profit_per_pair: float   # = $1.00 − yes_bid − no_bid
+
+    # Risk / sizing
     inventory_risk: float
     volatility_estimate: float
-    
-    # Order sizing
     optimal_yes_size: int
     optimal_no_size: int
+
+    # Legacy aliases kept for result aggregation
+    @property
+    def total_expected_profit(self) -> float:
+        return self.locked_profit_per_pair
 
 
 class AdvancedMarketMaker:
     """
-    Advanced market making strategy that provides liquidity while capturing edge.
-    
-    This implements cutting-edge market making techniques:
-    - Dynamic spread calculation based on volatility and edge
-    - Inventory risk management  
-    - Optimal order sizing using Kelly Criterion
-    - Cross-market arbitrage opportunities
+    Synthetic-spread market maker for Kalshi prediction markets.
+
+    Places a YES-buy and a NO-buy at prices whose sum is strictly less than
+    $1.00, locking in a profit if both sides fill.  Edge-filtered via the
+    AI's probability estimate before any order is placed.
     """
-    
+
     def __init__(
         self,
         db_manager: DatabaseManager,
         kalshi_client: KalshiClient,
-        xai_client: XAIClient
+        xai_client: XAIClient,
     ):
         self.db_manager = db_manager
         self.kalshi_client = kalshi_client
         self.xai_client = xai_client
         self.logger = get_trading_logger("market_maker")
-        
-        # Market making parameters
-        self.min_spread = getattr(settings.trading, 'min_spread_for_making', 0.03)  # $0.03 minimum
-        self.max_spread = getattr(settings.trading, 'max_bid_ask_spread', 0.10)  # $0.10 maximum
-        self.target_inventory = 0.0  # Neutral inventory target
-        self.inventory_penalty = getattr(settings.trading, 'max_inventory_risk', 0.01)
-        self.volatility_multiplier = 2.0  # Volatility adjustment factor
-        
-        # Order management
-        self.active_orders: Dict[str, List[LimitOrder]] = {}  # market_id -> orders
-        self.filled_orders: List[LimitOrder] = []
+
+        self.min_spread = getattr(settings.trading, "min_spread_for_making", 0.03)
+        self.max_spread = getattr(settings.trading, "max_bid_ask_spread", 0.10)
+        self.inventory_penalty = getattr(settings.trading, "max_inventory_risk", 0.01)
+
+        self.active_orders: Dict[str, List[LimitOrder]] = {}
         self.total_pnl = 0.0
-        
-        # Performance tracking
         self.markets_traded = 0
         self.total_volume = 0
-        self.win_rate = 0.0
+
+    # ── Analysis ──────────────────────────────────────────────────────────────
 
     async def analyze_market_making_opportunities(
-        self, 
-        markets: List[Market]
+        self, markets: List[Market]
     ) -> List[MarketMakingOpportunity]:
-        """
-        Analyze markets for market making opportunities.
-        
-        Returns list of opportunities ranked by expected profitability.
-        """
         opportunities = []
-        
+
         for market in markets:
             try:
-                # Get current market data
                 market_data = await self.kalshi_client.get_market(market.market_id)
                 if not market_data:
                     continue
-                    
-                # Handle both new and old field formats
-                current_yes_price = float(market_data.get('yes_bid_dollars', 0) or market_data.get('yes_price', 0) or 0)
-                current_no_price = float(market_data.get('no_bid_dollars', 0) or market_data.get('no_price', 0) or 0)
-                
-                # Convert cents to dollars if needed
-                if current_yes_price > 1.0:
-                    current_yes_price = current_yes_price / 100.0
-                if current_no_price > 1.0:
-                    current_no_price = current_no_price / 100.0
-                
-                # Skip if prices are extreme (hard to make markets) - relaxed thresholds
-                if current_yes_price < 0.02 or current_yes_price > 0.98:
+
+                mkt = market_data.get("market", market_data)
+
+                # Support both dollar-denominated and cents fields
+                yes_bid = float(mkt.get("yes_bid_dollars", 0) or mkt.get("yes_bid", 0) or 0)
+                yes_ask = float(mkt.get("yes_ask_dollars", 0) or mkt.get("yes_ask", 0) or 0)
+                no_bid  = float(mkt.get("no_bid_dollars",  0) or mkt.get("no_bid",  0) or 0)
+                no_ask  = float(mkt.get("no_ask_dollars",  0) or mkt.get("no_ask",  0) or 0)
+
+                if yes_bid > 1.0: yes_bid /= 100.0
+                if yes_ask > 1.0: yes_ask /= 100.0
+                if no_bid  > 1.0: no_bid  /= 100.0
+                if no_ask  > 1.0: no_ask  /= 100.0
+
+                yes_mid = (yes_bid + yes_ask) / 2 if (yes_bid + yes_ask) > 0 else 0.0
+                no_mid  = (no_bid  + no_ask)  / 2 if (no_bid  + no_ask)  > 0 else 0.0
+
+                # Skip extreme prices — hard to make markets profitably
+                if yes_mid < 0.03 or yes_mid > 0.97:
                     continue
-                
-                # Get AI prediction for edge calculation
+
                 analysis = await self._get_ai_analysis(market)
                 if not analysis:
                     continue
-                    
-                ai_prob = analysis.get('probability', 0.5)
-                ai_confidence = analysis.get('confidence', 0.5)
-                
-                # Apply edge filtering before creating market making opportunity
+
+                ai_prob  = analysis.get("probability", 0.5)
+                ai_conf  = analysis.get("confidence",  0.5)
+
+                # Edge filter — only proceed if AI sees meaningful mispricing
                 from src.utils.edge_filter import EdgeFilter
-                
-                # Check if either side meets edge requirements
-                yes_edge_result = EdgeFilter.calculate_edge(ai_prob, current_yes_price, ai_confidence)
-                no_edge_result = EdgeFilter.calculate_edge(1 - ai_prob, current_no_price, ai_confidence)
-                
-                # Only proceed if at least one side meets edge requirements
-                if yes_edge_result.passes_filter or no_edge_result.passes_filter:
-                    # Calculate market making opportunity
-                    opportunity = await self._calculate_market_making_opportunity(
-                        market, current_yes_price, current_no_price, ai_prob, ai_confidence
+                yes_edge = EdgeFilter.calculate_edge(ai_prob,       yes_mid, ai_conf)
+                no_edge  = EdgeFilter.calculate_edge(1 - ai_prob,   no_mid,  ai_conf)
+
+                if yes_edge.passes_filter or no_edge.passes_filter:
+                    opp = self._calculate_opportunity(
+                        market, yes_mid, no_mid, ai_prob, ai_conf
                     )
-                    
-                    if opportunity and opportunity.total_expected_profit > 0:
-                        opportunities.append(opportunity)
-                        self.logger.info(f"✅ MARKET MAKING APPROVED: {market.market_id} - YES edge: {yes_edge_result.edge_percentage:.1%}, NO edge: {no_edge_result.edge_percentage:.1%}")
+                    if opp and opp.locked_profit_per_pair > 0:
+                        opportunities.append(opp)
+                        self.logger.info(
+                            f"MM APPROVED: {market.market_id} | "
+                            f"locked profit/pair ${opp.locked_profit_per_pair:.4f}"
+                        )
                 else:
-                    self.logger.info(f"❌ MARKET MAKING FILTERED: {market.market_id} - Insufficient edge on both sides")
-                    
+                    self.logger.debug(
+                        f"MM FILTERED: {market.market_id} — insufficient edge on both sides"
+                    )
+
             except Exception as e:
-                self.logger.error(f"Error analyzing market {market.market_id}: {e}")
+                self.logger.error(f"Error analysing market {market.market_id}: {e}")
                 continue
-        
-        # Sort by expected profitability
-        opportunities.sort(key=lambda x: x.total_expected_profit, reverse=True)
+
+        opportunities.sort(key=lambda x: x.locked_profit_per_pair, reverse=True)
         return opportunities
 
-    async def _calculate_market_making_opportunity(
+    def _calculate_opportunity(
         self,
         market: Market,
-        yes_price: float,
-        no_price: float, 
+        yes_mid: float,
+        no_mid: float,
         ai_prob: float,
-        ai_confidence: float
+        ai_conf: float,
     ) -> Optional[MarketMakingOpportunity]:
         """
-        Calculate optimal market making prices and expected profits.
+        Compute YES-bid and NO-bid so that YES_bid + NO_bid < $1.00.
+
+        Target spread is derived from volatility and clipped to [min_spread, max_spread].
+        If the AI has a directional view we tilt both bids accordingly, still
+        keeping their sum below $1.00.
         """
         try:
-            # Calculate edge (difference between AI prediction and market price)
-            yes_edge = ai_prob - yes_price
-            no_edge = (1 - ai_prob) - no_price
-            
-            # Estimate volatility from price and time to expiry
-            volatility = self._estimate_volatility(yes_price, market)
-            
-            # Calculate optimal spreads
-            base_spread = max(self.min_spread, min(self.max_spread, volatility * self.volatility_multiplier))
-            
-            # Adjust spread based on edge and confidence
-            edge_adjustment = abs(yes_edge) * ai_confidence
-            adjusted_spread = base_spread * (1 + edge_adjustment)
-            
-            # Calculate optimal bid/ask prices
-            if yes_edge > 0:  # AI thinks YES is underpriced
-                optimal_yes_bid = yes_price + (adjusted_spread / 2)
-                optimal_yes_ask = yes_price + adjusted_spread
-                optimal_no_bid = no_price - adjusted_spread
-                optimal_no_ask = no_price - (adjusted_spread / 2)
-            else:  # AI thinks NO is underpriced  
-                optimal_yes_bid = yes_price - adjusted_spread
-                optimal_yes_ask = yes_price - (adjusted_spread / 2)
-                optimal_no_bid = no_price + (adjusted_spread / 2)
-                optimal_no_ask = no_price + adjusted_spread
-            
-            # Ensure prices are within bounds
-            optimal_yes_bid = max(0.01, min(0.99, optimal_yes_bid))
-            optimal_yes_ask = max(0.01, min(0.99, optimal_yes_ask))
-            optimal_no_bid = max(0.01, min(0.99, optimal_no_bid))
-            optimal_no_ask = max(0.01, min(0.99, optimal_no_ask))
-            
-            # Calculate expected profits
-            yes_spread_profit = (optimal_yes_ask - optimal_yes_bid) * ai_confidence
-            no_spread_profit = (optimal_no_ask - optimal_no_bid) * ai_confidence
-            total_expected_profit = yes_spread_profit + no_spread_profit
-            
-            # Calculate optimal position sizes using Kelly Criterion
+            volatility = self._estimate_volatility(yes_mid, market)
+            raw_spread = max(self.min_spread, min(self.max_spread,
+                             volatility * 2.0))
+
+            # Directional tilt: if AI thinks YES is underpriced, bid YES higher
+            # and NO lower (but keep total < $1.00)
+            yes_edge = ai_prob - yes_mid          # positive → YES cheap
+            tilt = yes_edge * ai_conf * 0.5       # bounded tilt
+
+            half_spread = raw_spread / 2.0
+
+            # Place bids BELOW their respective mid-prices
+            optimal_yes_bid = yes_mid - half_spread + tilt
+            optimal_no_bid  = no_mid  - half_spread - tilt
+
+            # Hard bounds
+            optimal_yes_bid = max(0.01, min(0.98, optimal_yes_bid))
+            optimal_no_bid  = max(0.01, min(0.98, optimal_no_bid))
+
+            # Ensure the pair is profitable (sum < $1.00)
+            total_cost = optimal_yes_bid + optimal_no_bid
+            if total_cost >= 1.00:
+                # Widen spread until it is
+                excess = total_cost - 0.98
+                optimal_yes_bid -= excess / 2
+                optimal_no_bid  -= excess / 2
+                optimal_yes_bid = max(0.01, optimal_yes_bid)
+                optimal_no_bid  = max(0.01, optimal_no_bid)
+                total_cost = optimal_yes_bid + optimal_no_bid
+
+            locked_profit = 1.00 - total_cost
+            if locked_profit <= 0:
+                return None
+
             yes_size, no_size = self._calculate_optimal_sizes(
-                yes_edge, no_edge, volatility, ai_confidence
+                ai_prob - yes_mid, (1 - ai_prob) - no_mid, volatility, ai_conf
             )
-            
+
             return MarketMakingOpportunity(
                 market_id=market.market_id,
                 market_title=market.title,
-                current_yes_price=yes_price,
-                current_no_price=no_price,
+                current_yes_mid=yes_mid,
+                current_no_mid=no_mid,
                 ai_predicted_prob=ai_prob,
-                ai_confidence=ai_confidence,
+                ai_confidence=ai_conf,
                 optimal_yes_bid=optimal_yes_bid,
-                optimal_yes_ask=optimal_yes_ask,
                 optimal_no_bid=optimal_no_bid,
-                optimal_no_ask=optimal_no_ask,
-                yes_spread_profit=yes_spread_profit,
-                no_spread_profit=no_spread_profit,
-                total_expected_profit=total_expected_profit,
+                locked_profit_per_pair=locked_profit,
                 inventory_risk=volatility,
                 volatility_estimate=volatility,
                 optimal_yes_size=yes_size,
-                optimal_no_size=no_size
+                optimal_no_size=no_size,
             )
-            
         except Exception as e:
             self.logger.error(f"Error calculating opportunity for {market.market_id}: {e}")
             return None
 
     def _estimate_volatility(self, price: float, market: Market) -> float:
-        """
-        Estimate market volatility based on price level and time to expiry.
-        
-        Uses the theoretical volatility of binary options.
-        """
         try:
-            # Get time to expiry in days
-            if hasattr(market, 'expiration_ts') and market.expiration_ts:
-                expiry_time = datetime.fromtimestamp(market.expiration_ts)
-                time_to_expiry = (expiry_time - datetime.now()).total_seconds() / 86400
-                time_to_expiry = max(0.1, time_to_expiry)  # Minimum 0.1 days
+            if hasattr(market, "expiration_ts") and market.expiration_ts:
+                expiry = datetime.fromtimestamp(market.expiration_ts)
+                tte = max(0.1, (expiry - datetime.now()).total_seconds() / 86400)
             else:
-                time_to_expiry = 7.0  # Default 7 days
-            
-            # Binary option volatility formula: σ = sqrt(p(1-p)/t)
-            # Where p is probability and t is time to expiry
-            intrinsic_vol = np.sqrt(price * (1 - price) / time_to_expiry)
-            
-            # Scale to reasonable range
+                tte = 7.0
+            # Binary-option volatility proxy: σ = √(p(1−p)/t)
+            intrinsic_vol = np.sqrt(price * (1 - price) / tte)
             return max(0.01, min(0.20, intrinsic_vol))
-            
-        except Exception as e:
-            self.logger.error(f"Error estimating volatility: {e}")
-            return 0.05  # Default 5%
+        except Exception:
+            return 0.05
 
     def _calculate_optimal_sizes(
-        self, 
-        yes_edge: float, 
-        no_edge: float, 
+        self,
+        yes_edge: float,
+        no_edge: float,
         volatility: float,
-        confidence: float
+        confidence: float,
     ) -> Tuple[int, int]:
-        """
-        Calculate optimal position sizes using Kelly Criterion principles.
-        """
         try:
-            # Available capital for market making
-            available_capital = getattr(settings.trading, 'max_position_size', 1000)
-            
-            # Kelly fraction calculation
-            # f* = (bp - q) / b where b=odds, p=win_prob, q=lose_prob
-            
-            # For YES side
-            if yes_edge > 0:
-                win_prob = 0.5 + (yes_edge * confidence)
-                kelly_yes = max(0, min(0.25, (win_prob - 0.5) / 0.5))  # Cap at 25%
-                yes_size = int(available_capital * kelly_yes)
-            else:
-                yes_size = int(available_capital * 0.05)  # Small size for unfavorable
-            
-            # For NO side  
-            if no_edge > 0:
-                win_prob = 0.5 + (no_edge * confidence)
-                kelly_no = max(0, min(0.25, (win_prob - 0.5) / 0.5))
-                no_size = int(available_capital * kelly_no)
-            else:
-                no_size = int(available_capital * 0.05)
-            
-            # Ensure minimum sizes
-            yes_size = max(10, yes_size)  # Minimum $10
-            no_size = max(10, no_size)
-            
-            return yes_size, no_size
-            
-        except Exception as e:
-            self.logger.error(f"Error calculating sizes: {e}")
-            return 50, 50  # Default sizes
+            available_capital = getattr(settings.trading, "max_position_size", 500.0)
+
+            def kelly_size(edge: float) -> int:
+                if edge > 0:
+                    win_prob = min(0.95, 0.5 + edge * confidence)
+                    kelly_f = max(0.0, min(0.25, (win_prob - 0.5) / 0.5))
+                    return max(5, int(available_capital * kelly_f))
+                return max(5, int(available_capital * 0.05))
+
+            return kelly_size(yes_edge), kelly_size(no_edge)
+        except Exception:
+            return 50, 50
+
+    # ── Execution ─────────────────────────────────────────────────────────────
 
     async def execute_market_making_strategy(
-        self, 
-        opportunities: List[MarketMakingOpportunity]
+        self, opportunities: List[MarketMakingOpportunity]
     ) -> Dict:
-        """
-        Execute market making strategy on top opportunities.
-        """
         results = {
-            'orders_placed': 0,
-            'total_exposure': 0.0,
-            'expected_profit': 0.0,
-            'markets_count': 0
+            "orders_placed": 0,
+            "total_exposure": 0.0,
+            "expected_profit": 0.0,
+            "markets_count": 0,
         }
-        
-        # Limit to top opportunities based on available capital
-        max_markets = getattr(settings.trading, 'max_concurrent_markets', 10)
-        top_opportunities = opportunities[:max_markets]
-        
-        for opportunity in top_opportunities:
+
+        max_markets = getattr(settings.trading, "max_concurrent_markets", 10)
+        top = opportunities[:max_markets]
+
+        for opp in top:
             try:
-                await self._place_market_making_orders(opportunity)
-                
-                results['orders_placed'] += 2  # YES and NO orders
-                results['total_exposure'] += opportunity.optimal_yes_size + opportunity.optimal_no_size
-                results['expected_profit'] += opportunity.total_expected_profit
-                results['markets_count'] += 1
-                
+                placed = await self._place_market_making_orders(opp)
+                results["orders_placed"] += placed
+                results["total_exposure"] += opp.optimal_yes_size + opp.optimal_no_size
+                results["expected_profit"] += opp.locked_profit_per_pair
+                results["markets_count"] += 1
                 self.logger.info(
-                    f"Market making orders placed for {opportunity.market_title}: "
-                    f"Expected profit: ${opportunity.total_expected_profit:.2f}"
+                    f"MM orders placed for {opp.market_title}: "
+                    f"locked ${opp.locked_profit_per_pair:.4f}/pair"
                 )
-                
             except Exception as e:
-                self.logger.error(f"Error executing market making for {opportunity.market_id}: {e}")
+                self.logger.error(f"Error executing MM for {opp.market_id}: {e}")
                 continue
-        
+
         return results
 
-    async def _place_market_making_orders(self, opportunity: MarketMakingOpportunity):
+    async def _place_market_making_orders(
+        self, opportunity: MarketMakingOpportunity
+    ) -> int:
         """
-        Place the actual limit orders for market making.
+        Place the YES-bid and NO-bid orders.
+        Both are BUY orders; their prices sum to less than $1.00, so if both
+        fill the locked spread is the profit.
+        Returns the number of orders successfully placed (0, 1, or 2).
         """
-        orders = []
-        
-        # Create YES bid order (we buy YES at lower price)
-        yes_bid_order = LimitOrder(
+        yes_order = LimitOrder(
             market_id=opportunity.market_id,
             side="YES",
-            price=opportunity.optimal_yes_bid * 100,  # Convert to cents
+            price=opportunity.optimal_yes_bid,
             quantity=opportunity.optimal_yes_size,
-            expected_profit=opportunity.yes_spread_profit
+            expected_profit=opportunity.locked_profit_per_pair / 2,
         )
-        
-        # Create NO bid order (we buy NO at lower price)  
-        no_bid_order = LimitOrder(
+        no_order = LimitOrder(
             market_id=opportunity.market_id,
-            side="NO", 
-            price=opportunity.optimal_no_bid * 100,
+            side="NO",
+            price=opportunity.optimal_no_bid,
             quantity=opportunity.optimal_no_size,
-            expected_profit=opportunity.no_spread_profit
+            expected_profit=opportunity.locked_profit_per_pair / 2,
         )
-        
-        orders.extend([yes_bid_order, no_bid_order])
-        
-        # Place orders with Kalshi (simulated for now)
-        for order in orders:
-            await self._place_limit_order(order)
-        
-        # Track active orders
+
+        placed = 0
+        for order in [yes_order, no_order]:
+            ok = await self._place_limit_order(order)
+            if ok:
+                placed += 1
+
+        # Track for monitoring
         if opportunity.market_id not in self.active_orders:
             self.active_orders[opportunity.market_id] = []
-        self.active_orders[opportunity.market_id].extend(orders)
+        self.active_orders[opportunity.market_id].extend([yes_order, no_order])
 
-    async def _place_limit_order(self, order: LimitOrder):
+        return placed
+
+    async def _place_limit_order(self, order: LimitOrder) -> bool:
         """
-        Place a limit order with the exchange.
+        Place a single limit BUY order with Kalshi (or simulate in paper mode).
+        Returns True on success.
         """
         try:
-            # Check if we're in live mode
-            live_mode = getattr(settings.trading, 'live_trading_enabled', False)
-            
+            live_mode = settings.trading.live_trading_enabled
+            price_cents = max(1, min(99, int(round(order.price * 100))))
+            side = order.side.lower()
+
+            order_params: Dict = {
+                "ticker": order.market_id,
+                "client_order_id": str(uuid.uuid4()),
+                "side": side,
+                "action": "buy",
+                "count": order.quantity,
+                "type_": "limit",
+            }
+            # Kalshi requires yes_price for YES side and no_price for NO side
+            if side == "yes":
+                order_params["yes_price"] = price_cents
+            else:
+                order_params["no_price"] = price_cents
+
             if live_mode:
-                # Place actual limit order with Kalshi
-                import uuid
-                client_order_id = str(uuid.uuid4())
-                
-                # Convert side to match Kalshi API
-                side = order.side.lower()  # "YES" -> "yes", "NO" -> "no"
-                
-                # Set price parameters based on side
-                order_params = {
-                    "ticker": order.market_id,
-                    "client_order_id": client_order_id,
-                    "side": side,
-                    "action": "buy",  # Market making involves buying at our bid prices
-                    "count": order.quantity,
-                    "type_": "limit"
-                }
-                
-                # Add the appropriate price parameter
-                if side == "yes":
-                    order_params["yes_price"] = int(order.price)  # Price in cents
-                else:
-                    order_params["no_price"] = int(order.price)
-                
-                # Place the order
-                response = await self.kalshi_client.place_order(**order_params)
-                
-                if response and 'order' in response:
+                # FIX: pass dict directly, not **-unpacked
+                response = await self.kalshi_client.place_order(order_params)
+                if response and "order" in response:
                     order.status = "placed"
                     order.placed_at = datetime.now()
-                    order.order_id = response['order'].get('order_id', client_order_id)
-                    
-                    # Convert cents back to dollars for display
-                    display_price = order.price / 100 if order.price > 1.0 else order.price
+                    order.order_id = response["order"].get("order_id", order_params["client_order_id"])
                     self.logger.info(
-                        f"✅ LIVE limit order placed: {order.side} {order.quantity} at ${display_price:.2f} "
-                        f"for market {order.market_id} (Order ID: {order.order_id})"
+                        f"LIVE limit order: {order.side} x{order.quantity} "
+                        f"@ ${order.price:.2f} for {order.market_id} (id={order.order_id})"
                     )
+                    return True
                 else:
                     self.logger.error(f"Failed to place live order: {response}")
                     order.status = "failed"
+                    return False
             else:
-                # Simulate order placement for paper trading
                 order.status = "placed"
                 order.placed_at = datetime.now()
                 order.order_id = f"sim_{order.market_id}_{order.side}_{int(datetime.now().timestamp())}"
-                
                 self.logger.info(
-                    f"📝 SIMULATED limit order placed: {order.side} {order.quantity} at {order.price:.1f}¢ "
-                    f"for market {order.market_id}"
+                    f"[SIMULATED] limit order: {order.side} x{order.quantity} "
+                    f"@ {price_cents}¢ for {order.market_id}"
                 )
-            
+                return True
+
         except Exception as e:
             self.logger.error(f"Error placing limit order: {e}")
             order.status = "failed"
+            return False
 
-    async def _get_ai_analysis(self, market: Market) -> Optional[Dict]:
-        """
-        Get AI analysis for market making edge calculation.
-        """
-        try:
-            # Use existing AI analysis but optimized for market making
-            prompt = f"""
-            MARKET MAKING ANALYSIS REQUEST
-            
-            Market: {market.title}
-            
-            Provide a quick assessment for market making in JSON format:
-            {{
-                "probability": [0.0-1.0 probability estimate],
-                "confidence": [0.0-1.0 confidence level],
-                "volatility_factors": "brief description",
-                "stability": [0.0-1.0 price stability estimate]
-            }}
-            
-            Focus on: probability estimate and confidence in that estimate.
-            """
-            
-            # Use AI analysis for market making - higher tokens for reasoning models
-            response = await self.xai_client.get_completion(
-                prompt, 
-                max_tokens=3000,  # Higher for reasoning models like grok-4
-                temperature=0.1   # Lower for consistency
-            )
-            
-            # Check if AI response is None (API exhausted or failed)
-            if response is None:
-                self.logger.info(f"AI analysis unavailable for {market.market_id} due to API limits, using conservative defaults")
-                return {
-                    'probability': 0.5,  # Neutral probability
-                    'confidence': 0.2,   # Low confidence
-                    'volatility_factors': "API unavailable",
-                    'stability': 0.3     # Low stability estimate
-                }
-            
-            # Try to parse JSON response
-            try:
-                import json
-                import re
-                
-                # Try to extract JSON from the response
-                json_match = re.search(r'\{.*\}', response, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(0)
-                    parsed_response = json.loads(json_str)
-                    
-                    if isinstance(parsed_response, dict) and 'probability' in parsed_response:
-                        # Validate the response
-                        probability = parsed_response.get('probability')
-                        confidence = parsed_response.get('confidence')
-                        
-                        if (isinstance(probability, (int, float)) and 0 <= probability <= 1 and
-                            isinstance(confidence, (int, float)) and 0 <= confidence <= 1):
-                            return parsed_response
-                        else:
-                            self.logger.warning(f"Invalid AI response format for {market.market_id}")
-                    
-            except (json.JSONDecodeError, ValueError) as e:
-                self.logger.warning(f"Failed to parse AI response for {market.market_id}: {e}")
-            
-            # If AI analysis fails, provide conservative defaults
-            self.logger.warning(f"AI analysis failed for {market.market_id}, using conservative defaults")
-            return {
-                'probability': 0.5,  # Neutral probability
-                'confidence': 0.3,   # Low confidence (will result in small positions)
-                'volatility_factors': 'AI analysis failed',
-                'stability': 0.5
-            }
-                
-        except Exception as e:
-            self.logger.error(f"Error getting AI analysis: {e}")
-            # Return conservative defaults instead of None
-            return {
-                'probability': 0.5,
-                'confidence': 0.3,
-                'volatility_factors': 'Error in analysis',
-                'stability': 0.5
-            }
+    # ── Order monitoring / updating ───────────────────────────────────────────
 
     async def monitor_and_update_orders(self):
-        """
-        Monitor active orders and update/cancel as needed.
-        """
-        for market_id, orders in self.active_orders.items():
-            try:
-                for order in orders:
-                    if order.status == "placed":
-                        # Check if order is still competitive
-                        should_update = await self._should_update_order(order)
-                        if should_update:
-                            await self._update_order(order)
-                            
-            except Exception as e:
-                self.logger.error(f"Error monitoring orders for {market_id}: {e}")
+        for market_id, orders in list(self.active_orders.items()):
+            for order in orders:
+                try:
+                    if order.status == "placed" and await self._should_update_order(order):
+                        await self._update_order(order, market_id)
+                except Exception as e:
+                    self.logger.error(f"Error monitoring order for {market_id}: {e}")
 
     async def _should_update_order(self, order: LimitOrder) -> bool:
-        """
-        Determine if an order should be updated based on market conditions.
-        """
         try:
-            # Get current market data
             market_data = await self.kalshi_client.get_market(order.market_id)
             if not market_data:
                 return False
-            
-            current_yes_price = market_data.get('yes_price', 0) / 100
-            order_price = order.price / 100
-            
-            # Update if market has moved significantly
-            price_diff = abs(current_yes_price - order_price)
-            return price_diff > 0.05  # 5 cent threshold
-            
-        except Exception as e:
-            self.logger.error(f"Error checking order update: {e}")
+            mkt = market_data.get("market", market_data)
+            if order.side == "YES":
+                mid_raw = (
+                    float(mkt.get("yes_bid", 0) or 0)
+                    + float(mkt.get("yes_ask", 0) or 0)
+                ) / 2
+            else:
+                mid_raw = (
+                    float(mkt.get("no_bid", 0) or 0)
+                    + float(mkt.get("no_ask", 0) or 0)
+                ) / 2
+            current_mid = mid_raw / 100.0 if mid_raw > 1.0 else mid_raw
+            return abs(current_mid - order.price) > 0.05
+        except Exception:
             return False
 
-    async def _update_order(self, order: LimitOrder):
+    async def _update_order(self, order: LimitOrder, market_id: str):
         """
-        Update an existing order with new price/quantity.
+        Cancel the stale order and place a fresh one at the recalculated price.
+        Previously this was a stub that only logged without actually doing anything.
         """
         try:
-            # Cancel old order and place new one
+            live_mode = settings.trading.live_trading_enabled
+
+            # Step 1: cancel the existing order
+            if live_mode and order.order_id:
+                try:
+                    await self.kalshi_client.cancel_order(order.order_id)
+                    self.logger.info(f"Cancelled stale order {order.order_id}")
+                except Exception as e:
+                    self.logger.warning(f"Could not cancel order {order.order_id}: {e}")
+
             order.status = "cancelled"
-            
-            # Recalculate optimal price
-            # This would need to recalculate the market making opportunity
-            
-            self.logger.info(f"Updated order {order.order_id}")
-            
+
+            # Step 2: recalculate price from fresh market data
+            market_data = await self.kalshi_client.get_market(market_id)
+            mkt = market_data.get("market", market_data) if market_data else {}
+
+            if order.side == "YES":
+                bid_raw = float(mkt.get("yes_bid_dollars", 0) or mkt.get("yes_bid", 0) or 0)
+                ask_raw = float(mkt.get("yes_ask_dollars", 0) or mkt.get("yes_ask", 0) or 0)
+            else:
+                bid_raw = float(mkt.get("no_bid_dollars", 0) or mkt.get("no_bid", 0) or 0)
+                ask_raw = float(mkt.get("no_ask_dollars", 0) or mkt.get("no_ask", 0) or 0)
+
+            if bid_raw > 1.0: bid_raw /= 100.0
+            if ask_raw > 1.0: ask_raw /= 100.0
+            new_mid = (bid_raw + ask_raw) / 2 if (bid_raw + ask_raw) > 0 else order.price
+
+            # Re-apply half-spread below new mid
+            new_price = max(0.01, min(0.98, new_mid - self.min_spread / 2))
+            order.price = new_price
+
+            # Step 3: place fresh order
+            await self._place_limit_order(order)
+
         except Exception as e:
-            self.logger.error(f"Error updating order: {e}")
+            self.logger.error(f"Error updating order for {market_id}: {e}")
+
+    # ── AI analysis ───────────────────────────────────────────────────────────
+
+    async def _get_ai_analysis(self, market: Market) -> Optional[Dict]:
+        try:
+            prompt = f"""
+MARKET MAKING ANALYSIS REQUEST
+
+Market: {market.title}
+
+Provide a quick assessment for market making in JSON format:
+{{
+    "probability": [0.0-1.0 probability estimate],
+    "confidence": [0.0-1.0 confidence level],
+    "volatility_factors": "brief description",
+    "stability": [0.0-1.0 price stability estimate]
+}}
+
+Focus on: probability estimate and confidence in that estimate.
+"""
+            response = await self.xai_client.get_completion(
+                prompt, max_tokens=3000, temperature=0.1
+            )
+
+            if response is None:
+                return {
+                    "probability": 0.5,
+                    "confidence": 0.2,
+                    "volatility_factors": "API unavailable",
+                    "stability": 0.3,
+                }
+
+            import json, re
+            json_match = re.search(r"\{.*\}", response, re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group(0))
+                prob = parsed.get("probability")
+                conf = parsed.get("confidence")
+                if (
+                    isinstance(prob, (int, float)) and 0 <= prob <= 1
+                    and isinstance(conf, (int, float)) and 0 <= conf <= 1
+                ):
+                    return parsed
+
+            return {
+                "probability": 0.5,
+                "confidence": 0.3,
+                "volatility_factors": "parse failed",
+                "stability": 0.5,
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error getting AI analysis: {e}")
+            return {
+                "probability": 0.5,
+                "confidence": 0.3,
+                "volatility_factors": "error",
+                "stability": 0.5,
+            }
 
     def get_performance_summary(self) -> Dict:
-        """
-        Get performance summary of market making strategy.
-        """
         try:
-            active_count = sum(len(orders) for orders in self.active_orders.values())
-            filled_count = len(self.filled_orders)
-            
+            active_count = sum(len(v) for v in self.active_orders.values())
             return {
-                'total_pnl': self.total_pnl,
-                'active_orders': active_count,
-                'filled_orders': filled_count,
-                'markets_traded': self.markets_traded,
-                'win_rate': self.win_rate,
-                'total_volume': self.total_volume
+                "total_pnl": self.total_pnl,
+                "active_orders": active_count,
+                "markets_traded": self.markets_traded,
+                "total_volume": self.total_volume,
             }
-            
-        except Exception as e:
-            self.logger.error(f"Error getting performance summary: {e}")
+        except Exception:
             return {}
 
 
+# ── Module entry point ────────────────────────────────────────────────────────
+
 async def run_market_making_strategy(
     db_manager: DatabaseManager,
-    kalshi_client: KalshiClient, 
-    xai_client: XAIClient
+    kalshi_client: KalshiClient,
+    xai_client: XAIClient,
 ) -> Dict:
-    """
-    Main entry point for market making strategy.
-    """
     logger = get_trading_logger("market_making_main")
-    
+
     try:
-        # Initialize market maker
         market_maker = AdvancedMarketMaker(db_manager, kalshi_client, xai_client)
-        
-        # Get eligible markets (remove time restrictions!)
+
         markets = await db_manager.get_eligible_markets(
-            volume_min=30000,  # Higher volume for market making (needs more liquidity)
-            max_days_to_expiry=365  # Accept any timeline
+            volume_min=30000,
+            max_days_to_expiry=365,
         )
-        
+
         if not markets:
             logger.warning("No eligible markets found for market making")
-            return {'error': 'No markets available'}
-        
-        logger.info(f"Analyzing {len(markets)} markets for market making opportunities")
-        
-        # Analyze opportunities
+            return {"error": "No markets available"}
+
+        logger.info(f"Analysing {len(markets)} markets for market-making opportunities")
+
         opportunities = await market_maker.analyze_market_making_opportunities(markets)
-        
+
         if not opportunities:
-            logger.warning("No profitable market making opportunities found")
-            return {'opportunities': 0}
-        
-        logger.info(f"Found {len(opportunities)} profitable market making opportunities")
-        
-        # Execute strategy
+            logger.warning("No profitable market-making opportunities found")
+            return {"opportunities": 0}
+
+        logger.info(f"Found {len(opportunities)} profitable market-making opportunities")
+
         results = await market_maker.execute_market_making_strategy(opportunities)
-        
-        # Add performance summary
-        results['performance'] = market_maker.get_performance_summary()
-        
-        logger.info(f"Market making strategy completed: {results}")
+        results["performance"] = market_maker.get_performance_summary()
+
+        logger.info(f"Market-making strategy completed: {results}")
         return results
-        
+
     except Exception as e:
-        logger.error(f"Error in market making strategy: {e}")
-        return {'error': str(e)} 
+        logger.error(f"Error in market-making strategy: {e}")
+        return {"error": str(e)}
