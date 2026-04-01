@@ -204,14 +204,17 @@ def load_signal_performance() -> List[Dict]:
 def load_balance() -> Dict:
     """Fetch live Kalshi balance."""
     async def _get():
-        kc = KalshiClient(
-            api_key=settings.api.kalshi_api_key,
-            base_url=settings.api.kalshi_base_url,
-        )
+        kc = KalshiClient()
         bal = await kc.get_balance()
         await kc.close()
-        raw = float(bal.get("balance", 0) or bal.get("available_balance", 0) or 0)
-        return raw / 100.0 if raw > 1.0 else raw
+        # Kalshi returns balance in cents — divide by 100 to get dollars
+        raw = float(
+            bal.get("balance", 0)
+            or bal.get("available_balance", 0)
+            or (bal.get("portfolio", {}) or {}).get("balance", 0)
+            or 0
+        )
+        return raw / 100.0 if raw > 100 else raw
     try:
         return {"balance": _run_async(_get())}
     except Exception:
