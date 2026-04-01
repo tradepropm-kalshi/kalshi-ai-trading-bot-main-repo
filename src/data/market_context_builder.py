@@ -30,6 +30,7 @@ from src.data.free_data_sources import (
     ESPNClient,
     FREDClient,
     MetaculusClient,
+    MLBStatsClient,
     NewsAPIClient,
     OddsAPIClient,
     OpenMeteoClient,
@@ -49,14 +50,92 @@ _NEWS_VOLUME_THRESHOLD = 50_000.0
 # Sport-name → ESPN sport/league slugs
 # ---------------------------------------------------------------------------
 _SPORT_MAP = {
+    # Basketball
     "ncaab": ("basketball", "mens-college-basketball"),
     "ncaa":  ("basketball", "mens-college-basketball"),
     "nba":   ("basketball", "nba"),
-    "nfl":   ("football",   "nfl"),
-    "mlb":   ("baseball",   "mlb"),
-    "nhl":   ("hockey",     "nhl"),
-    "mls":   ("soccer",     "usa.1"),
     "wnba":  ("basketball", "wnba"),
+    # Football
+    "nfl":   ("football",   "nfl"),
+    # Baseball
+    "mlb":   ("baseball",   "mlb"),
+    "baseball": ("baseball", "mlb"),
+    # Hockey
+    "nhl":   ("hockey",     "nhl"),
+    # Soccer
+    "mls":      ("soccer", "usa.1"),
+    "soccer":   ("soccer", "usa.1"),
+    "epl":      ("soccer", "eng.1"),
+    "premier":  ("soccer", "eng.1"),
+    "ucl":      ("soccer", "uefa.champions"),
+    "champions": ("soccer", "uefa.champions"),
+    # Golf
+    "golf":  ("golf", "pga"),
+    "pga":   ("golf", "pga"),
+    # Tennis
+    "tennis": ("tennis", "atp"),
+    "atp":    ("tennis", "atp"),
+    "wta":    ("tennis", "wta"),
+    # Racing
+    "nascar": ("racing", "nascar-premier"),
+    "f1":     ("racing", "f1"),
+    "formula1": ("racing", "f1"),
+    "indycar":  ("racing", "indycar"),
+    # Combat
+    "ufc":    ("mma", "ufc"),
+    "mma":    ("mma", "ufc"),
+}
+
+# ---------------------------------------------------------------------------
+# MLB team name fragments → ballpark city (for weather context)
+# Weather is the single biggest external factor in MLB prediction markets:
+# wind direction affects home runs, rain causes delays, cold suppresses offense.
+# ---------------------------------------------------------------------------
+_MLB_TEAM_CITIES = {
+    "yankees": "new york",    "mets": "new york",
+    "red sox": "boston",      "cubs": "chicago",
+    "white sox": "chicago",   "dodgers": "los angeles",
+    "angels": "los angeles",  "giants": "san francisco",
+    "athletics": "oakland",   "padres": "san diego",
+    "mariners": "seattle",    "astros": "houston",
+    "rangers": "dallas",      "cardinals": "st louis",
+    "brewers": "milwaukee",   "twins": "minneapolis",
+    "tigers": "detroit",      "indians": "cleveland",
+    "guardians": "cleveland", "reds": "cincinnati",
+    "pirates": "pittsburgh",  "phillies": "philadelphia",
+    "braves": "atlanta",      "marlins": "miami",
+    "nationals": "washington","orioles": "baltimore",
+    "rays": "tampa",          "blue jays": "toronto",
+    "royals": "kansas city",  "rockies": "denver",
+    "diamondbacks": "phoenix","padres": "san diego",
+}
+
+# ---------------------------------------------------------------------------
+# Active PGA Tour venue cities by typical month (approximate)
+# Used to fetch weather at the course location for golf markets.
+# ---------------------------------------------------------------------------
+_PGA_VENUE_BY_KEYWORD = {
+    "masters": "augusta",
+    "augusta": "augusta",
+    "players": "ponte vedra",
+    "us open": "los angeles",     # 2025 venue
+    "open championship": "royal troon",
+    "pga championship": "charlotte",
+    "wells fargo": "charlotte",
+    "colonial": "fort worth",
+    "memorial": "columbus",
+    "travelers": "hartford",
+    "scottish open": "north berwick",
+    "genesis": "los angeles",
+    "waste management": "phoenix",
+    "farmers": "san diego",
+    "att pebble": "monterey",
+    "torrey": "san diego",
+    "houston open": "houston",
+    "valspar": "tampa",
+    "zurich": "new orleans",
+    "rbc heritage": "hilton head",
+    "new orleans": "new orleans",
 }
 
 # ---------------------------------------------------------------------------
@@ -152,8 +231,18 @@ class MarketContextBuilder:
 
         sport_slug = self._detect_sport(category, title)
         if sport_slug:
-            tasks["espn"]    = self._get_sports_context(market.title, sport_slug)
-            tasks["odds"]    = self._get_odds_context(market.title, sport_slug[1])
+            sport_type = sport_slug[0]  # "golf", "racing", "tennis", "baseball", etc.
+            if sport_type == "golf":
+                tasks["golf"] = self._get_golf_context(market.title)
+            elif sport_type == "racing":
+                tasks["racing"] = self._get_racing_context(market.title, sport_slug[1])
+            else:
+                tasks["espn"] = self._get_sports_context(market.title, sport_slug)
+                tasks["odds"] = self._get_odds_context(market.title, sport_slug[1])
+
+            # For baseball, also fetch ballpark weather — it directly affects outcomes
+            if sport_type == "baseball" or any(k in category for k in ("mlb", "baseball")):
+                tasks["ballpark_wx"] = self._get_mlb_weather_context(market.title)
 
         if "weather" in category or "temperature" in title or "rain" in title:
             tasks["weather"] = self._get_weather_context(market.title)
@@ -206,38 +295,37 @@ class MarketContextBuilder:
         self, title: str, sport_slug: tuple
     ) -> str:
         """Fetch ESPN live scores and injury report for the relevant sport."""
-        sport, league = sport_slug
+        _sport, league = sport_slug  # sport unused — ESPN uses league slug directly
         espn = ESPNClient()
         lines: List[str] = []
 
-        scores_data = await espn.get_live_scores(sport, league)
-        if scores_data:
-            games = scores_data.get("events", [])[:5]
-            if games:
-                lines.append("ESPN live games:")
-                for g in games:
-                    comps = g.get("competitions", [{}])[0]
-                    competitors = comps.get("competitors", [])
-                    if len(competitors) >= 2:
-                        home = competitors[0]
-                        away = competitors[1]
-                        h_name  = home.get("team", {}).get("abbreviation", "?")
-                        a_name  = away.get("team", {}).get("abbreviation", "?")
-                        h_score = home.get("score", "")
-                        a_score = away.get("score", "")
-                        status  = g.get("status", {}).get("type", {}).get("description", "")
-                        lines.append(f"  {h_name} {h_score} vs {a_name} {a_score} ({status})")
+        scores = await espn.get_live_scores(league)
+        if scores:
+            title_lower = title.lower()
+            # Show all games, or filter to ones matching the market title
+            relevant = [
+                g for g in scores
+                if g["away_team"].lower() in title_lower
+                or g["home_team"].lower() in title_lower
+            ] or scores[:4]
+            lines.append("ESPN live games:")
+            for g in relevant[:5]:
+                score_str = (
+                    f"{g['away_score']}-{g['home_score']}"
+                    if g.get("away_score", "") != "" else "scheduled"
+                )
+                lines.append(
+                    f"  {g['away_team']} @ {g['home_team']}: "
+                    f"{score_str} ({g['status']})"
+                )
 
-        injuries = await espn.get_injury_report(sport, league)
+        injuries = await espn.get_injury_report(league)
         if injuries:
-            entries = injuries.get("injuries", [])[:6]
-            if entries:
-                lines.append("Key injuries:")
-                for inj in entries:
-                    player = inj.get("athlete", {}).get("fullName", "?")
-                    team   = inj.get("team", {}).get("abbreviation", "?")
-                    status = inj.get("status", "?")
-                    lines.append(f"  {player} ({team}) — {status}")
+            lines.append("Key injuries:")
+            for inj in injuries[:6]:
+                lines.append(
+                    f"  {inj['player']} ({inj['team']}) — {inj['status']}"
+                )
 
         return "\n".join(lines) if lines else ""
 
@@ -249,12 +337,23 @@ class MarketContextBuilder:
 
         # Map ESPN league slug to Odds API sport key
         sport_key_map = {
-            "nba":                   "basketball_nba",
-            "nfl":                   "americanfootball_nfl",
-            "mlb":                   "baseball_mlb",
-            "nhl":                   "icehockey_nhl",
+            # Basketball
+            "nba":                     "basketball_nba",
             "mens-college-basketball": "basketball_ncaab",
-            "wnba":                  "basketball_wnba",
+            "wnba":                    "basketball_wnba",
+            # Football
+            "nfl":                     "americanfootball_nfl",
+            # Baseball
+            "mlb":                     "baseball_mlb",
+            # Hockey
+            "nhl":                     "icehockey_nhl",
+            # Soccer
+            "usa.1":                   "soccer_usa_mls",
+            "eng.1":                   "soccer_epl",
+            "uefa.champions":          "soccer_uefa_champs_league",
+            # Tennis
+            "atp":                     "tennis_atp",
+            "wta":                     "tennis_wta",
         }
         sport_key = sport_key_map.get(league)
         if not sport_key:
@@ -396,6 +495,223 @@ class MarketContextBuilder:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # Golf context — leaderboard + course weather
+    # ------------------------------------------------------------------
+
+    async def _get_golf_context(self, title: str) -> str:
+        """
+        Fetch PGA Tour leaderboard from ESPN + course weather from Open-Meteo.
+
+        Golf prediction markets ("Will X win the Masters?", "Will someone
+        shoot 59?") are highly weather-sensitive and leaderboard-dependent.
+        Knowing the current leader, cut line, and wind speed at the course
+        is the single most predictive data point available.
+        """
+        lines: List[str] = []
+        title_lower = title.lower()
+
+        # --- ESPN golf leaderboard ---
+        try:
+            espn = ESPNClient()
+            leaders = await espn.get_live_scores("pga")
+            if leaders:
+                lines.append("PGA Tour leaderboard (ESPN):")
+                for g in leaders[:8]:
+                    away = g.get("away_team", "")
+                    score = g.get("away_score", "")
+                    status = g.get("status", "")
+                    if away:
+                        lines.append(f"  {away}: {score} ({status})")
+        except Exception:
+            pass
+
+        # --- Course weather ---
+        venue_city = None
+        for keyword, city in _PGA_VENUE_BY_KEYWORD.items():
+            if keyword in title_lower:
+                venue_city = city
+                break
+        if not venue_city:
+            venue_city = self._detect_city(title)
+
+        if venue_city:
+            try:
+                wx = OpenMeteoClient()
+                data = await wx.get_forecast_for_city(venue_city)
+                if data:
+                    daily  = data.get("daily", {})
+                    times  = daily.get("time", [])
+                    temps  = daily.get("temperature_2m_max", [])
+                    wind   = daily.get("windspeed_10m_max", [])
+                    precip = daily.get("precipitation_probability_max", [])
+                    if times:
+                        lines.append(f"Course weather ({venue_city.title()}):")
+                        for i in range(min(3, len(times))):
+                            t  = temps[i]  if i < len(temps)  else "?"
+                            w  = wind[i]   if i < len(wind)   else "?"
+                            r  = precip[i] if i < len(precip) else "?"
+                            lines.append(
+                                f"  {times[i]}: high {t}°F, "
+                                f"wind {w} mph, precip {r}%"
+                            )
+            except Exception:
+                pass
+
+        return "\n".join(lines) if lines else ""
+
+    # ------------------------------------------------------------------
+    # Racing context — standings + circuit weather
+    # ------------------------------------------------------------------
+
+    async def _get_racing_context(self, title: str, league_slug: str) -> str:
+        """
+        Fetch F1/NASCAR/IndyCar driver standings + circuit weather.
+
+        Championship-position markets ("Will Verstappen win the title?")
+        need current standings. Race-winner markets need track conditions.
+        """
+        lines: List[str] = []
+        title_lower = title.lower()
+
+        # --- ESPN standings / live race ---
+        try:
+            espn = ESPNClient()
+            results = await espn.get_live_scores(league_slug)
+            if results:
+                lines.append(f"ESPN {league_slug} standings/results:")
+                for g in results[:6]:
+                    away  = g.get("away_team", "")
+                    home  = g.get("home_team", "")
+                    score = g.get("away_score", "")
+                    if away or home:
+                        lines.append(f"  {away or home}: {score} ({g['status']})")
+        except Exception:
+            pass
+
+        # --- Circuit weather (city detection from title) ---
+        city = self._detect_city(title)
+        if city:
+            try:
+                wx = OpenMeteoClient()
+                data = await wx.get_forecast_for_city(city)
+                if data:
+                    daily  = data.get("daily", {})
+                    times  = daily.get("time", [])
+                    temps  = daily.get("temperature_2m_max", [])
+                    wind   = daily.get("windspeed_10m_max", [])
+                    precip = daily.get("precipitation_probability_max", [])
+                    if times:
+                        lines.append(f"Track weather ({city.title()}):")
+                        for i in range(min(2, len(times))):
+                            t = temps[i]  if i < len(temps)  else "?"
+                            w = wind[i]   if i < len(wind)   else "?"
+                            r = precip[i] if i < len(precip) else "?"
+                            lines.append(
+                                f"  {times[i]}: high {t}°F, "
+                                f"wind {w} mph, precip {r}%"
+                            )
+            except Exception:
+                pass
+
+        return "\n".join(lines) if lines else ""
+
+    # ------------------------------------------------------------------
+    # MLB context — probable pitchers + standings + ballpark weather
+    # ------------------------------------------------------------------
+
+    async def _get_mlb_weather_context(self, title: str) -> str:
+        """
+        Full MLB context: probable starters + team standings + ballpark weather.
+
+        Combines three free sources that collectively give the AI the most
+        predictive MLB data available:
+
+          1. **MLB Stats API** — probable pitchers (ERA/WHIP), today's scores,
+             division standings. A Cy Young starter vs a AAA callup can swing
+             a Kalshi run-total market by 15–20¢.
+
+          2. **Open-Meteo** — ballpark weather. Wind blowing out at Wrigley
+             increases home-run rates measurably. Rain probability determines
+             whether a game gets delayed (relevant for "played today?" markets).
+
+        All sources are free with no auth required.
+        """
+        title_lower = title.lower()
+        lines: List[str] = []
+
+        # --- MLB Stats API: probable pitchers + today's games ---
+        try:
+            mlb = MLBStatsClient()
+            games, pitchers = await asyncio.gather(
+                mlb.get_todays_games(),
+                mlb.get_probable_pitchers(),
+                return_exceptions=True,
+            )
+            if isinstance(games, Exception):
+                games = []
+            if isinstance(pitchers, Exception):
+                pitchers = []
+
+            mlb_context = mlb.format_context(
+                games, pitchers, title_filter=title
+            )
+            if mlb_context:
+                lines.append(mlb_context)
+
+            # Division standings for the teams in the title
+            standings = await mlb.get_standings(league_id=103)  # AL
+            nl_standings = await mlb.get_standings(league_id=104)  # NL
+            all_standings = standings + nl_standings
+            relevant = [
+                s for s in all_standings
+                if s["team"].lower() in title_lower
+            ]
+            if relevant:
+                lines.append("Standings:")
+                for s in relevant[:2]:
+                    lines.append(
+                        f"  {s['team']} ({s['division']}): "
+                        f"{s['wins']}-{s['losses']} ({s['pct']}), "
+                        f"{s['gb']} GB"
+                    )
+        except Exception:
+            pass
+
+        # --- Ballpark weather ---
+        city = None
+        for team, team_city in _MLB_TEAM_CITIES.items():
+            if team in title_lower:
+                city = team_city
+                break
+        if not city:
+            city = self._detect_city(title)
+
+        if city:
+            try:
+                wx = OpenMeteoClient()
+                data = await wx.get_forecast_for_city(city)
+                if data:
+                    daily  = data.get("daily", {})
+                    times  = daily.get("time", [])
+                    temps  = daily.get("temperature_2m_max", [])
+                    wind   = daily.get("windspeed_10m_max", [])
+                    precip = daily.get("precipitation_probability_max", [])
+                    if times:
+                        lines.append(f"Ballpark weather ({city.title()}):")
+                        for i in range(min(2, len(times))):
+                            t = temps[i]  if i < len(temps)  else "?"
+                            w = wind[i]   if i < len(wind)   else "?"
+                            r = precip[i] if i < len(precip) else "?"
+                            lines.append(
+                                f"  {times[i]}: high {t}°F, "
+                                f"wind {w} mph, precip {r}%"
+                            )
+            except Exception:
+                pass
+
+        return "\n".join(lines) if lines else ""
+
+    # ------------------------------------------------------------------
     # News headlines (high-volume markets only)
     # ------------------------------------------------------------------
 
@@ -419,17 +735,48 @@ class MarketContextBuilder:
 
     @staticmethod
     def _detect_sport(category: str, title: str) -> Optional[tuple]:
-        """Return (sport, league) ESPN slugs if the market is a sports market."""
+        """
+        Return ``(sport, league_slug)`` ESPN slugs for *category* / *title*.
+
+        Checks exact keyword matches first (most reliable), then falls back to
+        semantic title patterns for ambiguous cases.
+        """
         combined = f"{category} {title}"
+
+        # Exact keyword match against _SPORT_MAP keys
         for keyword, slugs in _SPORT_MAP.items():
             if keyword in combined:
                 return slugs
+
+        # Semantic fallbacks for common title patterns
+        if any(k in combined for k in ("birdie", "eagle", "par ", "bogey", "hole",
+                                        "course", "round ", "green jacket", "cut line",
+                                        "tour championship")):
+            return _SPORT_MAP["golf"]
+
+        if any(k in combined for k in ("grand slam", "set ", "ace ", "serve",
+                                        "wimbledon", "roland garros", "us open tennis",
+                                        "australian open", "french open")):
+            return _SPORT_MAP["tennis"]
+
+        if any(k in combined for k in ("lap ", "pit stop", "qualifying", "pole position",
+                                        "circuit", "grand prix", "checkered")):
+            return _SPORT_MAP["f1"]
+
+        if any(k in combined for k in ("innings", "strikeout", "home run", "batting",
+                                        "world series", "no-hitter", "shutout")):
+            return _SPORT_MAP["mlb"]
+
+        if any(k in combined for k in ("goal ", "penalty kick", "offsides",
+                                        "clean sheet", "premier league", "champions league")):
+            return _SPORT_MAP["soccer"]
+
         if any(k in combined for k in ("game", "match", "champion", "finals", "playoff")):
-            # Generic sports — default to NBA for basketball feel
             if "basket" in combined:
                 return _SPORT_MAP["nba"]
             if "football" in combined or " nfl" in combined:
                 return _SPORT_MAP["nfl"]
+
         return None
 
     @staticmethod

@@ -278,16 +278,35 @@ class OpenMeteoClient:
 # ===========================================================================
 
 _ESPN_LEAGUE_MAP = {
+    # Basketball
     "nba":   "basketball/nba",
-    "nfl":   "football/nfl",
     "ncaab": "basketball/mens-college-basketball",
     "ncaa":  "basketball/mens-college-basketball",
+    "wnba":  "basketball/wnba",
+    # Football
+    "nfl":   "football/nfl",
+    # Baseball
     "mlb":   "baseball/mlb",
+    # Hockey
     "nhl":   "hockey/nhl",
-    "mls":   "soccer/usa.1",
-    "nascar":"racing/nascar-cup",
+    # Soccer
+    "mls":       "soccer/usa.1",
+    "usa.1":     "soccer/usa.1",
+    "eng.1":     "soccer/eng.1",
+    "uefa.champions": "soccer/uefa.champions",
+    # Golf
     "pga":   "golf/pga",
+    "golf":  "golf/pga",
+    # Racing
+    "nascar":    "racing/nascar-cup",
+    "nascar-premier": "racing/nascar-cup",
+    "f1":        "racing/f1",
+    "indycar":   "racing/indycar",
+    # Combat
     "ufc":   "mma/ufc",
+    # Tennis (ESPN scoreboard uses ATP/WTA tour slugs)
+    "atp":   "tennis/atp",
+    "wta":   "tennis/wta",
 }
 
 
@@ -874,4 +893,246 @@ class NewsAPIClient:
         for a in articles[:4]:
             ts = a["published_at"][:10] if a.get("published_at") else ""
             lines.append(f"  [{ts}] {a['title'][:100]}")
+        return "\n".join(lines)
+
+
+# ===========================================================================
+# MLB Stats API — official free MLB data, no auth required
+# ===========================================================================
+
+class MLBStatsClient:
+    """
+    Fetch live game state, probable pitchers, standings, and player stats
+    from the official MLB Stats API.
+
+    Completely free, no API key required.  This is the single best source
+    for MLB prediction markets because:
+
+      - **Probable pitchers**: Knowing a Cy Young winner is starting vs a
+        AAA callup is worth ~10-15¢ of edge on run-total / win markets.
+      - **Live game state**: Score, inning, outs, baserunners in real-time.
+      - **Team standings**: Division leader vs last-place team context.
+      - **Pitcher stats**: ERA, WHIP, K/9 for the day's starters.
+
+    Usage::
+
+        mlb = MLBStatsClient()
+        games = await mlb.get_todays_games()
+        pitchers = await mlb.get_probable_pitchers()
+        standings = await mlb.get_standings()
+    """
+
+    BASE = "https://statsapi.mlb.com/api/v1"
+
+    async def get_todays_games(self) -> List[Dict]:
+        """
+        Fetch today's MLB schedule with live scores and game state.
+
+        Returns:
+            List of game dicts with keys: ``away_team``, ``home_team``,
+            ``away_score``, ``home_score``, ``status``, ``inning``,
+            ``venue``, ``game_pk``.
+        """
+        try:
+            async with _client() as http:
+                r = await http.get(
+                    f"{self.BASE}/schedule",
+                    params={"sportId": 1, "hydrate": "linescore,team"},
+                )
+                if r.status_code != 200:
+                    return []
+                dates = r.json().get("dates", [])
+                games = []
+                for date in dates[:1]:
+                    for g in date.get("games", []):
+                        teams  = g.get("teams", {})
+                        status = g.get("status", {}).get("detailedState", "")
+                        ls     = g.get("linescore", {})
+                        inning = ls.get("currentInning", "")
+                        games.append({
+                            "away_team":  teams.get("away", {}).get("team", {}).get("name", "?"),
+                            "home_team":  teams.get("home", {}).get("team", {}).get("name", "?"),
+                            "away_score": teams.get("away", {}).get("score", ""),
+                            "home_score": teams.get("home", {}).get("score", ""),
+                            "status":     status,
+                            "inning":     inning,
+                            "venue":      g.get("venue", {}).get("name", ""),
+                            "game_pk":    g.get("gamePk", 0),
+                        })
+                return games
+        except Exception as exc:
+            logger.debug(f"MLBStats games failed: {exc}")
+            return []
+
+    async def get_probable_pitchers(self) -> List[Dict]:
+        """
+        Fetch today's probable starting pitchers with their season stats.
+
+        This is the single highest-value data point for MLB prediction
+        markets: ERA, WHIP, and strikeout rate directly predict game outcomes.
+
+        Returns:
+            List of dicts with ``game``, ``away_pitcher``, ``home_pitcher``,
+            ``away_era``, ``home_era``, ``away_whip``, ``home_whip``.
+        """
+        try:
+            async with _client() as http:
+                r = await http.get(
+                    f"{self.BASE}/schedule",
+                    params={
+                        "sportId": 1,
+                        "hydrate": "probablePitcher(note),team",
+                    },
+                )
+                if r.status_code != 200:
+                    return []
+                dates = r.json().get("dates", [])
+                matchups = []
+                for date in dates[:1]:
+                    for g in date.get("games", []):
+                        teams  = g.get("teams", {})
+                        away_p = teams.get("away", {}).get("probablePitcher", {})
+                        home_p = teams.get("home", {}).get("probablePitcher", {})
+                        if not away_p and not home_p:
+                            continue
+                        away_team = teams.get("away", {}).get("team", {}).get("name", "?")
+                        home_team = teams.get("home", {}).get("team", {}).get("name", "?")
+                        matchups.append({
+                            "game":         f"{away_team} @ {home_team}",
+                            "away_pitcher": away_p.get("fullName", "TBD"),
+                            "home_pitcher": home_p.get("fullName", "TBD"),
+                            "away_era":     away_p.get("stats", [{}])[-1].get(
+                                "stats", {}).get("era", "?") if away_p else "?",
+                            "home_era":     home_p.get("stats", [{}])[-1].get(
+                                "stats", {}).get("era", "?") if home_p else "?",
+                        })
+                return matchups
+        except Exception as exc:
+            logger.debug(f"MLBStats pitchers failed: {exc}")
+            return []
+
+    async def get_standings(self, league_id: int = 103) -> List[Dict]:
+        """
+        Fetch current MLB division standings.
+
+        Args:
+            league_id: 103 = AL, 104 = NL.
+
+        Returns:
+            List of team standing dicts with ``team``, ``wins``, ``losses``,
+            ``pct``, ``gb`` (games behind), ``division``.
+        """
+        try:
+            async with _client() as http:
+                r = await http.get(
+                    f"{self.BASE}/standings",
+                    params={"leagueId": league_id, "standingsTypes": "regularSeason"},
+                )
+                if r.status_code != 200:
+                    return []
+                records = r.json().get("records", [])
+                standings = []
+                for division in records:
+                    div_name = division.get("division", {}).get("nameShort", "")
+                    for entry in division.get("teamRecords", []):
+                        standings.append({
+                            "team":     entry.get("team", {}).get("name", "?"),
+                            "wins":     entry.get("wins", 0),
+                            "losses":   entry.get("losses", 0),
+                            "pct":      entry.get("winningPercentage", ".000"),
+                            "gb":       entry.get("gamesBack", "-"),
+                            "division": div_name,
+                        })
+                return standings
+        except Exception as exc:
+            logger.debug(f"MLBStats standings failed: {exc}")
+            return []
+
+    async def get_player_stats(self, player_id: int, group: str = "pitching") -> Dict:
+        """
+        Fetch current-season stats for a specific player.
+
+        Args:
+            player_id: MLB player ID (from probablePitcher data).
+            group:     ``"pitching"`` or ``"hitting"``.
+
+        Returns:
+            Dict of stat keys: era, whip, strikeouts, avg, ops, etc.
+        """
+        try:
+            async with _client() as http:
+                r = await http.get(
+                    f"{self.BASE}/people/{player_id}/stats",
+                    params={"stats": "season", "group": group},
+                )
+                if r.status_code != 200:
+                    return {}
+                stats_list = r.json().get("stats", [])
+                if stats_list:
+                    splits = stats_list[0].get("splits", [])
+                    if splits:
+                        return splits[0].get("stat", {})
+                return {}
+        except Exception as exc:
+            logger.debug(f"MLBStats player stats failed: {exc}")
+            return {}
+
+    def format_context(
+        self,
+        games: List[Dict],
+        pitchers: List[Dict],
+        title_filter: str = "",
+    ) -> str:
+        """
+        Format MLB game state and probable pitchers into a compact context string.
+
+        Args:
+            games:         From :meth:`get_todays_games`.
+            pitchers:      From :meth:`get_probable_pitchers`.
+            title_filter:  If set, only include games where a team name
+                           appears in this string (market title matching).
+
+        Returns:
+            Multi-line context string ready to inject into the AI prompt.
+        """
+        lines: List[str] = []
+        filter_lower = title_filter.lower()
+
+        relevant_games = [
+            g for g in games
+            if not filter_lower
+            or g["away_team"].lower() in filter_lower
+            or g["home_team"].lower() in filter_lower
+        ] or games[:3]  # Fall back to first 3 if no filter match
+
+        if relevant_games:
+            lines.append("MLB today (MLB Stats API):")
+            for g in relevant_games[:4]:
+                score_str = (
+                    f"{g['away_score']}-{g['home_score']}"
+                    if g["away_score"] != "" else "scheduled"
+                )
+                inning_str = f" (inn {g['inning']})" if g["inning"] else ""
+                lines.append(
+                    f"  {g['away_team']} @ {g['home_team']}: "
+                    f"{score_str}{inning_str} — {g['status']}"
+                )
+
+        relevant_pitchers = [
+            p for p in pitchers
+            if not filter_lower
+            or any(t.lower() in filter_lower for t in p["game"].split(" @ "))
+        ] or pitchers[:3]
+
+        if relevant_pitchers:
+            lines.append("Probable starters:")
+            for p in relevant_pitchers[:4]:
+                away_era = f"ERA {p['away_era']}" if p["away_era"] != "?" else "ERA N/A"
+                home_era = f"ERA {p['home_era']}" if p["home_era"] != "?" else "ERA N/A"
+                lines.append(
+                    f"  {p['game']}:\n"
+                    f"    Away: {p['away_pitcher']} ({away_era})\n"
+                    f"    Home: {p['home_pitcher']} ({home_era})"
+                )
+
         return "\n".join(lines)

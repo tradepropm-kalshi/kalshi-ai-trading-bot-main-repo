@@ -46,17 +46,47 @@ BLOCKED_CATEGORIES = frozenset({
 
 #: Category override scores for categories with strong historical data.
 #  Derived from CategoryScorer seeded win-rate data.
+#
+#  Spring / summer additions (2025 season):
+#    MLB / baseball  — strong stat base, weather data available   → 52
+#    Tennis          — ATP/WTA rankings highly predictive          → 50
+#    Golf / PGA      — course + weather data materially helps      → 46
+#    Soccer / MLS    — volatile but liquid during MLS season       → 46
+#    F1              — championship standings + track weather       → 45
+#    NASCAR / racing — drafting chaos but qualifying data helps    → 43
+#    Combat (MMA/UFC/boxing) — records + reach data helps          → 43
 CATEGORY_SCORE_OVERRIDES = {
+    # Winter / year-round (proven)
     "ncaab":    74,
     "ncaa":     65,
+    "politics": 60,
+    "election": 62,
     "nba":      55,
     "nfl":      52,
     "sports":   50,
-    "politics": 60,
-    "election": 62,
+    # Spring / summer (new)
+    "mlb":      52,
+    "baseball": 52,
+    "tennis":   50,
+    "atp":      50,
+    "wta":      48,
+    "golf":     46,
+    "pga":      46,
+    "soccer":   46,
+    "mls":      44,
+    "f1":       45,
+    "formula1": 45,
+    "nascar":   43,
+    "racing":   43,
+    "indycar":  42,
+    "ufc":      43,
+    "mma":      43,
+    "boxing":   43,
+    # Markets / finance / misc
     "crypto":   45,
     "weather":  40,
     "markets":  40,
+    "nhl":      48,   # hockey playoffs run through June
     "other":    35,
 }
 
