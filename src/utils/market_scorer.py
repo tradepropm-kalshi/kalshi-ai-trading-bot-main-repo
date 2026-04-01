@@ -28,13 +28,13 @@ logger = get_trading_logger("market_scorer")
 # ---------------------------------------------------------------------------
 
 #: Minimum volume (in dollars) for a market to be considered at all.
-MIN_VOLUME = 10_000.0
+MIN_VOLUME = 500.0
 
 #: Volume at which the full 40-point volume score is awarded.
 FULL_VOLUME_SCORE_AT = 100_000.0
 
 #: Markets below this composite score are not sent for AI analysis.
-MIN_SCORE_TO_TRADE = 45.0
+MIN_SCORE_TO_TRADE = 20.0
 
 #: Hard-blocked categories (never trade regardless of score).
 BLOCKED_CATEGORIES = frozenset({

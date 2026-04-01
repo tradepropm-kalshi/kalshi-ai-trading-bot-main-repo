@@ -285,11 +285,11 @@ class KalshiTradeFeed:
             params["cursor"] = self._cursor
 
         try:
-            resp = await self._client.get("/trades", params=params)
+            resp = await self._client.get("/markets/trades", params=params)
             resp.raise_for_status()
             data = resp.json()
         except httpx.HTTPStatusError as exc:
-            logger.warning("GET /trades HTTP %s", exc.response.status_code)
+            logger.warning("GET /markets/trades HTTP %s", exc.response.status_code)
             return []
 
         raw_list = data.get("trades", [])
