@@ -226,6 +226,30 @@ class DatabaseManager:
                 )
             """)
 
+            # Order-flow signal outcomes — "wallet learning" equivalent
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS flow_signals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_type TEXT NOT NULL,
+                    market_id TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    signal_strength REAL DEFAULT 0.0,
+                    total_size INTEGER DEFAULT 0,
+                    avg_price REAL DEFAULT 0.0,
+                    fired_at TEXT NOT NULL,
+                    position_id INTEGER REFERENCES positions(id),
+                    outcome TEXT DEFAULT 'pending',
+                    pnl_pct REAL,
+                    closed_at TEXT
+                )
+            """)
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_fs_type ON flow_signals(signal_type)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_fs_market ON flow_signals(market_id)"
+            )
+
             # Seed the single phase_state row if absent
             await db.execute("""
                 INSERT OR IGNORE INTO phase_state
@@ -663,6 +687,94 @@ class DatabaseManager:
             await db.commit()
         if cost > 0:
             await self.record_ai_cost(cost)
+
+    # ── Flow-signal outcome tracking ─────────────────────────────────────────
+
+    async def log_flow_signal(
+        self,
+        signal_type: str,
+        market_id: str,
+        direction: str,
+        signal_strength: float,
+        total_size: int,
+        avg_price: float,
+        position_id: Optional[int] = None,
+    ) -> Optional[int]:
+        """Insert a new flow signal record and return its row id."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cur = await db.execute(
+                    """
+                    INSERT INTO flow_signals
+                        (signal_type, market_id, direction, signal_strength,
+                         total_size, avg_price, fired_at, position_id, outcome)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                    """,
+                    (
+                        signal_type, market_id, direction, signal_strength,
+                        total_size, avg_price, datetime.now().isoformat(),
+                        position_id,
+                    ),
+                )
+                await db.commit()
+                return cur.lastrowid
+        except Exception as exc:
+            self.logger.warning("Failed to log flow signal: %s", exc)
+            return None
+
+    async def close_flow_signal(
+        self,
+        signal_id: int,
+        outcome: str,        # "win" | "loss" | "scratch"
+        pnl_pct: float,
+    ) -> None:
+        """Record the outcome of a previously fired signal."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE flow_signals
+                SET outcome = ?, pnl_pct = ?, closed_at = ?
+                WHERE id = ?
+                """,
+                (outcome, pnl_pct, datetime.now().isoformat(), signal_id),
+            )
+            await db.commit()
+
+    async def get_signal_performance_summary(self) -> List[Dict]:
+        """
+        Return aggregate win/loss/avg_pnl stats grouped by signal_type.
+
+        Used by the dashboard and the KalshiTradeFeed.record_outcome loop
+        to show which signal types are most profitable.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT
+                    signal_type,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN outcome = 'loss' THEN 1 ELSE 0 END) AS losses,
+                    AVG(CASE WHEN pnl_pct IS NOT NULL THEN pnl_pct END) AS avg_pnl,
+                    MAX(fired_at) AS last_fired
+                FROM flow_signals
+                WHERE outcome != 'pending'
+                GROUP BY signal_type
+                ORDER BY avg_pnl DESC
+                """
+            ) as cur:
+                rows = await cur.fetchall()
+        return [
+            {
+                "signal_type": r[0],
+                "total": r[1],
+                "wins": r[2],
+                "losses": r[3],
+                "avg_pnl": round(r[4] or 0.0, 4),
+                "last_fired": r[5],
+            }
+            for r in rows
+        ]
 
     # ── Quick-flip persistent tracking ───────────────────────────────────────
 

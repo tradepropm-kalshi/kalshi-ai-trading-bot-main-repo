@@ -40,10 +40,12 @@ from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
 from src.config.settings import settings
 from src.core.bot_state import BotState, get_state, init_state
+from src.data.kalshi_trade_feed import KalshiTradeFeed
 from src.jobs.ingest import run_ingestion
 from src.jobs.track import run_tracking
 from src.jobs.evaluate import run_evaluation
 from src.jobs.trade import run_trading_job
+from src.strategies.flow_copy_trade import FlowCopyTradeStrategy
 from src.strategies.lean_directional import run_lean_directional
 from src.utils.database import DatabaseManager
 from src.utils.logging_setup import get_trading_logger, setup_logging
@@ -98,6 +100,11 @@ class BotOrchestrator:
         self._kalshi: Optional[KalshiClient] = None
         self._xai: Optional[XAIClient] = None
 
+        # Order-flow components (Beast Mode primary engine)
+        self._trade_feed: Optional[KalshiTradeFeed] = None
+        self._flow_strategy: Optional[FlowCopyTradeStrategy] = None
+        self._feed_task: Optional[asyncio.Task] = None
+
         self._beast_task: Optional[asyncio.Task] = None
         self._lean_task:  Optional[asyncio.Task] = None
         self._started_at = datetime.now()
@@ -120,14 +127,16 @@ class BotOrchestrator:
         self._db     = DatabaseManager()
         await self._db.initialize()
 
-        self._kalshi = KalshiClient(
-            api_key=settings.api.kalshi_api_key,
-            base_url=settings.api.kalshi_base_url,
+        self._kalshi = KalshiClient()
+        self._xai = XAIClient(db_manager=self._db)
+
+        # Initialise order-flow scanner (runs regardless of beast toggle so
+        # the feed is warm and has baseline velocity data when beast starts)
+        self._trade_feed = KalshiTradeFeed(live=beast_live)
+        self._feed_task = asyncio.create_task(
+            self._trade_feed.run(), name="trade_feed"
         )
-        self._xai = XAIClient(
-            api_key=settings.api.xai_api_key,
-            db_manager=self._db,
-        )
+        logger.info("Order-flow trade feed started (live=%s)", beast_live)
 
         # Capture starting balance for circuit-breaker
         try:
@@ -248,6 +257,17 @@ class BotOrchestrator:
         settings.trading.live_trading_enabled = self.state.beast_live
         settings.trading.paper_trading_mode   = not self.state.beast_live
 
+        # Create the flow copy-trade strategy bound to this beast session
+        self._flow_strategy = FlowCopyTradeStrategy(
+            db=self._db,
+            kalshi=self._kalshi,
+            xai=self._xai,
+            feed=self._trade_feed,
+            live=self.state.beast_live,
+            position_cap=BEAST_MAX_POSITIONS,
+        )
+        logger.info("FlowCopyTradeStrategy initialised for Beast Mode")
+
         while not self.state.shutdown_event.is_set() and self.state.beast_enabled:
             try:
                 # Circuit breaker
@@ -270,6 +290,9 @@ class BotOrchestrator:
                     db_manager=self._db,
                     kalshi_client=self._kalshi,
                     xai_client=self._xai,
+                    trade_feed=self._trade_feed,
+                    flow_strategy=self._flow_strategy,
+                    live=self.state.beast_live,
                 )
 
                 # Update dashboard state
@@ -426,6 +449,14 @@ class BotOrchestrator:
     async def _cleanup(self) -> None:
         """Close shared resources gracefully."""
         logger.info("Orchestrator shutting down")
+        # Stop the order-flow feed
+        if self._feed_task and not self._feed_task.done():
+            self._feed_task.cancel()
+        if self._trade_feed:
+            try:
+                await self._trade_feed.stop()
+            except Exception:
+                pass
         if self._kalshi:
             try:
                 await self._kalshi.close()

@@ -185,6 +185,21 @@ def load_llm_queries(hours: int = 24) -> List[Dict]:
         return []
 
 
+@st.cache_data(ttl=30)
+def load_signal_performance() -> List[Dict]:
+    """Load flow-signal outcome stats from the database."""
+    async def _get():
+        db = DatabaseManager()
+        await db.initialize()
+        rows = await db.get_signal_performance_summary()
+        await db.close()
+        return rows
+    try:
+        return _run_async(_get())
+    except Exception:
+        return []
+
+
 @st.cache_data(ttl=60)
 def load_balance() -> Dict:
     """Fetch live Kalshi balance."""
@@ -498,6 +513,54 @@ def render_performance() -> None:
         st.plotly_chart(fig2, use_container_width=True)
 
     st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # ── Order-flow signal performance (Beast Mode) ────────────────────────────
+    st.subheader("⚡ Beast Mode — Order-Flow Signal Performance")
+    sig_perf = load_signal_performance()
+    if sig_perf:
+        sig_df = pd.DataFrame(sig_perf)
+        sig_df["Win Rate %"] = (
+            sig_df["wins"] / sig_df["total"].clip(lower=1) * 100
+        ).round(1)
+        sig_df["Avg P&L %"] = (sig_df["avg_pnl"] * 100).round(2)
+        sig_df = sig_df.rename(columns={
+            "signal_type": "Signal Type",
+            "total": "Trades",
+            "wins": "Wins",
+            "losses": "Losses",
+            "last_fired": "Last Fired",
+        })
+        display_cols = ["Signal Type", "Trades", "Wins", "Losses", "Win Rate %", "Avg P&L %", "Last Fired"]
+        sig_df = sig_df[[c for c in display_cols if c in sig_df.columns]]
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            fig_sig = px.bar(
+                sig_df, x="Signal Type", y="Avg P&L %",
+                color="Avg P&L %", color_continuous_scale="RdYlGn",
+                title="Avg P&L % by Signal Type",
+            )
+            fig_sig.update_layout(height=320, showlegend=False)
+            st.plotly_chart(fig_sig, use_container_width=True)
+        with col_b:
+            fig_wr = px.bar(
+                sig_df, x="Signal Type", y="Win Rate %",
+                color="Win Rate %", color_continuous_scale="Blues",
+                title="Win Rate % by Signal Type",
+            )
+            fig_wr.update_layout(height=320, showlegend=False)
+            st.plotly_chart(fig_wr, use_container_width=True)
+
+        st.dataframe(sig_df, use_container_width=True, hide_index=True)
+        st.caption(
+            "Signal types: **block** = large single trade (smart money), "
+            "**momentum** = 3+ trades same direction in 30 s, "
+            "**imbalance** = >70% volume on one side, "
+            "**velocity** = 3× spike in trade rate. "
+            "The scanner re-weights signal confidence based on these outcomes."
+        )
+    else:
+        st.info("No closed flow-signal trades yet — Beast Mode order-flow data will appear here after first cycle.")
 
 
 # ---------------------------------------------------------------------------
