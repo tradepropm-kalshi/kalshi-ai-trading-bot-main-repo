@@ -109,7 +109,15 @@ class UnifiedAdvancedTradingSystem:
             )
 
         except Exception as e:
-            self.logger.error(f"Failed to initialise capital: {e}")
+            # In paper/sandbox mode a 401 on /portfolio/balance is expected —
+            # portfolio endpoints require RSA signing which is only needed for live.
+            if "401" in str(e) and not settings.trading.live_trading_enabled:
+                self.logger.info(
+                    f"Balance endpoint requires live auth (paper mode) — "
+                    f"using phase base capital ${settings.trading.phase_base_capital:.2f}"
+                )
+            else:
+                self.logger.error(f"Failed to initialise capital: {e}")
             self.total_capital = (
                 settings.trading.phase_base_capital
                 if settings.trading.phase_mode_enabled
