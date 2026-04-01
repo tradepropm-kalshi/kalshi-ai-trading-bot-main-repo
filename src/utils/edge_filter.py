@@ -11,7 +11,7 @@ Key Features:
 - Filtering logic for market opportunities
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 import math
 
@@ -166,7 +166,7 @@ class EdgeFilter:
         market_probability: float,
         confidence: float,
         additional_filters: Optional[Dict[str, Any]] = None
-    ) -> tuple[bool, str, EdgeFilterResult]:
+    ) -> Tuple[bool, str, EdgeFilterResult]:
         """
         Comprehensive trading decision based on edge filtering.
         

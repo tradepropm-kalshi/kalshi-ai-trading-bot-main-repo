@@ -164,7 +164,7 @@ class XAIClient(TradingLoggerMixin):
         if not self.db_manager or cost <= 0:
             return
         try:
-            await self.db_manager.upsert_daily_cost(cost)
+            await self.db_manager.record_ai_cost(cost)
         except Exception as e:
             self.logger.warning(f"Failed to persist xAI cost to DB: {e}")
 
@@ -249,23 +249,25 @@ class XAIClient(TradingLoggerMixin):
         if self.db_manager:
             try:
                 from src.utils.database import LLMQuery
-                
+
                 llm_query = LLMQuery(
-                    timestamp=datetime.now(),
-                    strategy=strategy,
+                    timestamp=datetime.now().isoformat(),
+                    market_id=market_id or "",
                     query_type=query_type,
-                    market_id=market_id,
-                    prompt=prompt[:2000],  # Truncate very long prompts
-                    response=response[:5000],  # Truncate very long responses
+                    model=self.primary_model,
+                    cost=cost_usd or 0.0,
+                    response=(response or "")[:5000],
+                    # Extended fields stored in response blob to avoid schema churn
+                    strategy=strategy,
+                    prompt=prompt[:2000],
                     tokens_used=tokens_used,
-                    cost_usd=cost_usd,
                     confidence_extracted=confidence_extracted,
-                    decision_extracted=decision_extracted
+                    decision_extracted=decision_extracted,
                 )
-                
-                # Use asyncio to avoid blocking
+
+                # Fire-and-forget — never block the trading path
                 asyncio.create_task(self.db_manager.log_llm_query(llm_query))
-                
+
             except Exception as e:
                 self.logger.error(f"Failed to log LLM query: {e}")
 

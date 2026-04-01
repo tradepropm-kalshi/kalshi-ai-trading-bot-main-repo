@@ -78,6 +78,12 @@ class LLMQuery:
     cost: float
     response: str = ""
     id: Optional[int] = None
+    # Extended fields used by xai_client._log_query — stored but not required
+    strategy: Optional[str] = None
+    prompt: Optional[str] = None
+    tokens_used: Optional[int] = None
+    confidence_extracted: Optional[float] = None
+    decision_extracted: Optional[str] = None
 
 
 @dataclass
@@ -178,7 +184,12 @@ class DatabaseManager:
                     query_type TEXT,
                     model TEXT,
                     cost REAL DEFAULT 0.0,
-                    response TEXT DEFAULT ''
+                    response TEXT DEFAULT '',
+                    strategy TEXT,
+                    prompt TEXT,
+                    tokens_used INTEGER,
+                    confidence_extracted REAL,
+                    decision_extracted TEXT
                 )
             """)
 
@@ -508,6 +519,66 @@ class DatabaseManager:
                 (today, cost),
             )
             await db.commit()
+
+    async def log_llm_query(self, llm_query: "LLMQuery"):
+        """Persist an LLM query record.  Fire-and-forget — errors are swallowed."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    """
+                    INSERT INTO llm_queries
+                        (timestamp, market_id, query_type, model, cost, response,
+                         strategy, prompt, tokens_used, confidence_extracted, decision_extracted)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        llm_query.timestamp,
+                        llm_query.market_id,
+                        llm_query.query_type,
+                        llm_query.model,
+                        llm_query.cost,
+                        llm_query.response,
+                        llm_query.strategy,
+                        llm_query.prompt,
+                        llm_query.tokens_used,
+                        llm_query.confidence_extracted,
+                        llm_query.decision_extracted,
+                    ),
+                )
+                await db.commit()
+        except Exception as e:
+            self.logger.warning(f"Failed to log LLM query: {e}")
+
+    async def add_llm_query(self, llm_query: "LLMQuery") -> Optional[int]:
+        """Insert an LLM query and return the row id."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cur = await db.execute(
+                    """
+                    INSERT INTO llm_queries
+                        (timestamp, market_id, query_type, model, cost, response,
+                         strategy, prompt, tokens_used, confidence_extracted, decision_extracted)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        llm_query.timestamp,
+                        llm_query.market_id,
+                        llm_query.query_type,
+                        llm_query.model,
+                        llm_query.cost,
+                        llm_query.response,
+                        llm_query.strategy,
+                        llm_query.prompt,
+                        llm_query.tokens_used,
+                        llm_query.confidence_extracted,
+                        llm_query.decision_extracted,
+                    ),
+                )
+                await db.commit()
+                return cur.lastrowid
+        except Exception as e:
+            self.logger.error(f"Failed to add LLM query: {e}")
+            return None
 
     # ── Market-analysis deduplication ────────────────────────────────────────
 
