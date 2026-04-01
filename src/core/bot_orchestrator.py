@@ -144,11 +144,11 @@ class BotOrchestrator:
 
         # Initialise order-flow scanner (runs regardless of beast toggle so
         # the feed is warm and has baseline velocity data when beast starts)
-        self._trade_feed = KalshiTradeFeed(live=beast_live)
+        self._trade_feed = KalshiTradeFeed(live=self.state.beast_live)
         self._feed_task = asyncio.create_task(
             self._trade_feed.run(), name="trade_feed"
         )
-        logger.info("Order-flow trade feed started (live=%s)", beast_live)
+        logger.info("Order-flow trade feed started (live=%s)", self.state.beast_live)
 
         # Capture starting balance for circuit-breaker
         try:
