@@ -2,37 +2,73 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "Beast Mode Bot (live trading)",
+      "name": "🎛️  Orchestrator — Beast + Lean (paper)",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["beast_mode_bot.py", "--mode", "live"],
+      "runtimeArgs": ["bot_orchestrator.py", "--beast", "--lean"],
       "port": 0
     },
     {
-      "name": "Beast Mode Bot (paper trading)",
+      "name": "🎛️  Orchestrator — Beast only (paper)",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["beast_mode_bot.py", "--mode", "paper"],
+      "runtimeArgs": ["bot_orchestrator.py", "--beast"],
       "port": 0
     },
     {
-      "name": "Paper Trader (signal loop)",
+      "name": "🎛️  Orchestrator — Lean only (paper)",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["paper_trader.py", "--loop"],
+      "runtimeArgs": ["bot_orchestrator.py", "--lean"],
       "port": 0
     },
     {
-      "name": "Beast Mode Dashboard (console)",
+      "name": "🎛️  Orchestrator — both LIVE",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["beast_mode_dashboard.py"],
+      "runtimeArgs": ["bot_orchestrator.py", "--beast", "--lean", "--live-both"],
       "port": 0
     },
     {
-      "name": "Streamlit Web Dashboard",
+      "name": "⚡ Streamlit Dashboard (unified)",
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "streamlit", "run", "streamlit_dashboard.py"],
       "port": 8501
     },
     {
-      "name": "CLI",
+      "name": "🐉 Beast Mode Bot (standalone, paper)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["beast_mode_bot.py"],
+      "port": 0
+    },
+    {
+      "name": "🐉 Beast Mode Bot (standalone, live)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["beast_mode_bot.py", "--live"],
+      "port": 0
+    },
+    {
+      "name": "🎯 Lean Bot (standalone, paper)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["lean_bot.py"],
+      "port": 0
+    },
+    {
+      "name": "🎯 Lean Bot (standalone, live)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["lean_bot.py", "--live"],
+      "port": 0
+    },
+    {
+      "name": "📄 Paper Trader (signal loop)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["paper_trader.py", "--loop"],
+      "port": 0
+    },
+    {
+      "name": "🖥️  Beast Mode Dashboard (console)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["beast_mode_dashboard.py"],
+      "port": 0
+    },
+    {
+      "name": "🔧 CLI",
       "runtimeExecutable": "python",
       "runtimeArgs": ["cli.py"],
       "port": 0
