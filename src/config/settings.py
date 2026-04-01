@@ -14,7 +14,7 @@ load_dotenv()
 class APIConfig:
     """API keys and base URLs."""
     kalshi_api_key: str = field(default_factory=lambda: os.getenv("KALSHI_API_KEY", ""))
-    kalshi_base_url: str = "https://api.elections.kalshi.com"
+    kalshi_base_url: str = "https://trading-api.kalshi.com"
     xai_api_key: str = field(default_factory=lambda: os.getenv("XAI_API_KEY", ""))
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
 

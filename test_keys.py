@@ -29,7 +29,7 @@ async def test_kalshi(key: str) -> tuple[bool, str]:
     try:
         async with httpx.AsyncClient(timeout=8) as c:
             r = await c.get(
-                "https://demo-api.kalshi.com/trade-api/rest/v2/markets",
+                "https://demo-api.kalshi.co/trade-api/rest/v2/markets",
                 headers={"Authorization": f"Bearer {key}"},
                 params={"limit": 1},
             )

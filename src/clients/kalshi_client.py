@@ -35,7 +35,7 @@ class KalshiClient(TradingLoggerMixin):
 
         if not self.is_live:
             self.logger.info("PAPER / SANDBOX MODE - Using API key only (no private key required)")
-            self.base_url = "https://demo-api.kalshi.com"
+            self.base_url = "https://demo-api.kalshi.co"
             # Keep the client alive across all requests — do NOT use it as a
             # context manager on individual calls or it gets closed after the first.
             self.client = httpx.AsyncClient(base_url=self.base_url, timeout=30.0)
