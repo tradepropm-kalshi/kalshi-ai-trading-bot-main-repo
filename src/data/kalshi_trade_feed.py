@@ -60,8 +60,8 @@ MAX_ACTIVE_SIGNALS: int = 20          # Cap on pending signal queue
 EMA_ALPHA: float = 0.2
 
 # Kalshi public REST base (no auth needed for /trades)
-KALSHI_API_BASE = "https://trading.kalshi.com/trade-api/rest/v2"
-KALSHI_DEMO_BASE = "https://demo-api.kalshi.com/trade-api/rest/v2"
+KALSHI_API_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+KALSHI_DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 
 
 # ---------------------------------------------------------------------------

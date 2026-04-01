@@ -174,12 +174,12 @@ class LeanDirectionalStrategy:
 
         # --- Load and score markets ---
         markets = await self.db_manager.get_eligible_markets(
-            volume_min=10_000,
+            volume_min=500,
             max_days_to_expiry=7,
         )
 
         if not markets:
-            logger.info("No eligible markets found (volume ≥ $10k, ≤ 7 days)")
+            logger.info("No eligible markets found (volume >= $10k, <= 7 days)")
             return result
 
         scored = self.scorer.rank_markets(markets, top_n=MAX_MARKETS_PER_CYCLE)
