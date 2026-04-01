@@ -34,6 +34,8 @@ from src.clients.xai_client import XAIClient
 from src.utils.database import DatabaseManager, Market
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
+from src.utils.price_utils import cents_to_dollars, dollars_to_cents
+from src.utils.response_parser import ResponseParser
 
 
 @dataclass
@@ -111,6 +113,14 @@ class AdvancedMarketMaker:
     async def analyze_market_making_opportunities(
         self, markets: List[Market]
     ) -> List[MarketMakingOpportunity]:
+        """
+        Screen *markets* for synthetic-spread opportunities.
+
+        For each market, fetches live prices, runs AI analysis, applies the
+        edge filter, and calculates the optimal YES-bid / NO-bid pair.
+
+        Returns a list sorted by descending locked profit per pair.
+        """
         opportunities = []
 
         for market in markets:
@@ -127,10 +137,11 @@ class AdvancedMarketMaker:
                 no_bid  = float(mkt.get("no_bid_dollars",  0) or mkt.get("no_bid",  0) or 0)
                 no_ask  = float(mkt.get("no_ask_dollars",  0) or mkt.get("no_ask",  0) or 0)
 
-                if yes_bid > 1.0: yes_bid /= 100.0
-                if yes_ask > 1.0: yes_ask /= 100.0
-                if no_bid  > 1.0: no_bid  /= 100.0
-                if no_ask  > 1.0: no_ask  /= 100.0
+                # Normalise to dollars if the API returned cents
+                if yes_bid > 1.0: yes_bid = cents_to_dollars(yes_bid)
+                if yes_ask > 1.0: yes_ask = cents_to_dollars(yes_ask)
+                if no_bid  > 1.0: no_bid  = cents_to_dollars(no_bid)
+                if no_ask  > 1.0: no_ask  = cents_to_dollars(no_ask)
 
                 yes_mid = (yes_bid + yes_ask) / 2 if (yes_bid + yes_ask) > 0 else 0.0
                 no_mid  = (no_bid  + no_ask)  / 2 if (no_bid  + no_ask)  > 0 else 0.0
@@ -247,6 +258,16 @@ class AdvancedMarketMaker:
             return None
 
     def _estimate_volatility(self, price: float, market: Market) -> float:
+        """
+        Estimate a volatility proxy using the binary-option formula σ = √(p(1−p)/t).
+
+        Args:
+            price:  Current mid-price in dollars.
+            market: Market dataclass (used for time-to-expiry).
+
+        Returns:
+            Volatility estimate clamped to [0.01, 0.20].
+        """
         try:
             if hasattr(market, "expiration_ts") and market.expiration_ts:
                 expiry = datetime.fromtimestamp(market.expiration_ts)
@@ -256,7 +277,7 @@ class AdvancedMarketMaker:
             # Binary-option volatility proxy: σ = √(p(1−p)/t)
             intrinsic_vol = np.sqrt(price * (1 - price) / tte)
             return max(0.01, min(0.20, intrinsic_vol))
-        except Exception:
+        except (ValueError, OverflowError, ZeroDivisionError, OSError):
             return 0.05
 
     def _calculate_optimal_sizes(
@@ -266,6 +287,18 @@ class AdvancedMarketMaker:
         volatility: float,
         confidence: float,
     ) -> Tuple[int, int]:
+        """
+        Compute fractional-Kelly position sizes for the YES and NO sides.
+
+        Args:
+            yes_edge:   AI probability minus YES mid-price.
+            no_edge:    (1 − AI probability) minus NO mid-price.
+            volatility: Estimated price volatility.
+            confidence: AI confidence score (0–1).
+
+        Returns:
+            ``(yes_size, no_size)`` contract counts, floored at 5.
+        """
         try:
             available_capital = getattr(settings.trading, "max_position_size", 500.0)
 
@@ -285,6 +318,12 @@ class AdvancedMarketMaker:
     async def execute_market_making_strategy(
         self, opportunities: List[MarketMakingOpportunity]
     ) -> Dict:
+        """
+        Execute the top *max_concurrent_markets* opportunities.
+
+        Places YES-bid and NO-bid orders for each approved opportunity and
+        returns an aggregated result dict.
+        """
         results = {
             "orders_placed": 0,
             "total_exposure": 0.0,
@@ -356,7 +395,7 @@ class AdvancedMarketMaker:
         """
         try:
             live_mode = settings.trading.live_trading_enabled
-            price_cents = max(1, min(99, int(round(order.price * 100))))
+            price_cents = dollars_to_cents(order.price)
             side = order.side.lower()
 
             order_params: Dict = {
@@ -407,6 +446,10 @@ class AdvancedMarketMaker:
     # ── Order monitoring / updating ───────────────────────────────────────────
 
     async def monitor_and_update_orders(self):
+        """
+        Check active orders for significant price drift and reprice any that
+        have moved more than 5 cents from their original placement price.
+        """
         for market_id, orders in list(self.active_orders.items()):
             for order in orders:
                 try:
@@ -465,8 +508,8 @@ class AdvancedMarketMaker:
                 bid_raw = float(mkt.get("no_bid_dollars", 0) or mkt.get("no_bid", 0) or 0)
                 ask_raw = float(mkt.get("no_ask_dollars", 0) or mkt.get("no_ask", 0) or 0)
 
-            if bid_raw > 1.0: bid_raw /= 100.0
-            if ask_raw > 1.0: ask_raw /= 100.0
+            if bid_raw > 1.0: bid_raw = cents_to_dollars(bid_raw)
+            if ask_raw > 1.0: ask_raw = cents_to_dollars(ask_raw)
             new_mid = (bid_raw + ask_raw) / 2 if (bid_raw + ask_raw) > 0 else order.price
 
             # Re-apply half-spread below new mid
@@ -510,10 +553,8 @@ Focus on: probability estimate and confidence in that estimate.
                     "stability": 0.3,
                 }
 
-            import json, re
-            json_match = re.search(r"\{.*\}", response, re.DOTALL)
-            if json_match:
-                parsed = json.loads(json_match.group(0))
+            parsed = ResponseParser.extract_json(response)
+            if parsed:
                 prob = parsed.get("probability")
                 conf = parsed.get("confidence")
                 if (

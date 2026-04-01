@@ -31,6 +31,7 @@ from src.clients.xai_client import XAIClient
 from src.utils.database import DatabaseManager, Market, Position
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
+from src.utils.price_utils import cents_to_dollars, contract_cost_dollars, expected_pnl_dollars
 from src.jobs.execute import place_sell_limit_order
 
 
@@ -83,6 +84,21 @@ class QuickFlipScalpingStrategy:
         markets: List[Market],
         available_capital: float,
     ) -> List[QuickFlipOpportunity]:
+        """
+        Screen *markets* for quick-flip opportunities.
+
+        A quick-flip opportunity is a contract trading at 1–20 cents where
+        the AI predicts a price increase of at least 100 % within 30 minutes.
+
+        Args:
+            markets:           Markets to evaluate (should already be filtered for
+                               volume and days-to-expiry by the caller).
+            available_capital: Total capital available to allocate across positions.
+
+        Returns:
+            Opportunities sorted by descending expected value, capped at the
+            number of positions the available capital can fund.
+        """
         opportunities = []
         self.logger.info(f"Analysing {len(markets)} markets for quick-flip opportunities")
 
@@ -104,11 +120,11 @@ class QuickFlipScalpingStrategy:
                     or 0
                 )
 
-                # Normalise to dollars if returned in cents
+                # Normalise to dollars if the API returned cents
                 if yes_price > 1.0:
-                    yes_price /= 100.0
+                    yes_price = cents_to_dollars(yes_price)
                 if no_price > 1.0:
-                    no_price /= 100.0
+                    no_price = cents_to_dollars(no_price)
 
                 for side, price in [("YES", yes_price), ("NO", no_price)]:
                     opp = await self._evaluate_price_opportunity(market, side, price, market_info)
@@ -141,6 +157,18 @@ class QuickFlipScalpingStrategy:
         current_price: float,
         market_info: dict,
     ) -> Optional[QuickFlipOpportunity]:
+        """
+        Evaluate a single side (YES or NO) of a market for a quick-flip entry.
+
+        Args:
+            market:        Market dataclass.
+            side:          ``"YES"`` or ``"NO"``.
+            current_price: Current ask price in dollars.
+            market_info:   Raw market data dict from the Kalshi API.
+
+        Returns:
+            ``QuickFlipOpportunity`` if the trade passes all filters, else ``None``.
+        """
         if not current_price or current_price <= 0:
             return None
         if current_price < self.config.min_entry_price or current_price > self.config.max_entry_price:
@@ -258,6 +286,17 @@ REASON: [brief explanation]
     async def execute_quick_flip_opportunities(
         self, opportunities: List[QuickFlipOpportunity]
     ) -> Dict:
+        """
+        Execute a list of approved quick-flip opportunities.
+
+        For each opportunity: inserts the position into the DB, places the buy
+        order, and immediately places a sell-limit order at the target price.
+        The pending sell is persisted to ``quick_flip_tracking`` so it survives
+        the 60-second cycle boundary.
+
+        Returns:
+            Aggregated result dict with counts and totals.
+        """
         results = {
             "positions_created": 0,
             "sell_orders_placed": 0,
@@ -274,8 +313,9 @@ REASON: [brief explanation]
 
                 if position_id is not None:
                     results["positions_created"] += 1
-                    # FIX: entry_price is already in dollars — no ÷100
-                    results["total_capital_used"] += opportunity.quantity * opportunity.entry_price
+                    results["total_capital_used"] += contract_cost_dollars(
+                        opportunity.quantity, opportunity.entry_price
+                    )
                     results["expected_profit"] += opportunity.expected_profit
 
                     sell_ok = await self._place_immediate_sell_order(opportunity, position_id)

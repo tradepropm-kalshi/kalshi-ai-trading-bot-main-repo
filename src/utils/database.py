@@ -239,6 +239,7 @@ class DatabaseManager:
     # ── Phase state ───────────────────────────────────────────────────────────
 
     async def get_phase_state(self) -> Dict:
+        """Return the current phase-profit state as a plain dict."""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 "SELECT current_phase_profit, total_secured_profit, phase_start_time, last_reset_time "
@@ -255,6 +256,7 @@ class DatabaseManager:
                 return {"current_phase_profit": 0.0, "total_secured_profit": 0.0}
 
     async def update_phase_profit(self, realized_pnl: float):
+        """Increment current_phase_profit by *realized_pnl* (can be negative)."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "UPDATE phase_state "
@@ -264,42 +266,62 @@ class DatabaseManager:
             )
             await db.commit()
 
-    async def secure_phase_profit(self, amount: Optional[float] = None):
-        """Secure one completed-phase chunk and reset current_phase_profit to 0."""
+    async def secure_phase_profit(self, amount: Optional[float] = None) -> bool:
+        """
+        Atomically secure one completed-phase chunk and reset current profit to 0.
+
+        Uses a single conditional UPDATE so concurrent callers cannot both
+        trigger the phase-completion logic (eliminates the classic
+        check-then-act race condition).
+
+        Args:
+            amount: Dollar amount to add to total_secured_profit.  Defaults
+                    to ``settings.trading.secure_profit_per_chunk``.
+
+        Returns:
+            ``True`` if the phase target was reached and profit was secured,
+            ``False`` if the current profit is still below the target.
+        """
         secure_amount = amount if amount is not None else getattr(
             settings.trading, "secure_profit_per_chunk", 2400.0
         )
         target = getattr(settings.trading, "phase_profit_target", 2500.0)
+        now = datetime.now().isoformat()
 
         async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                "SELECT current_phase_profit, total_secured_profit FROM phase_state WHERE id = 1"
-            ) as cur:
-                row = await cur.fetchone()
-            current = row[0] if row else 0.0
-            secured = row[1] if row else 0.0
+            # Single atomic statement: only executes when current_phase_profit >= target.
+            # rowcount == 1 means the condition was met and the update happened.
+            cur = await db.execute(
+                """
+                UPDATE phase_state
+                SET current_phase_profit = 0.0,
+                    total_secured_profit  = total_secured_profit + ?,
+                    last_reset_time       = ?
+                WHERE id = 1 AND current_phase_profit >= ?
+                """,
+                (secure_amount, now, target),
+            )
+            await db.commit()
+            secured = cur.rowcount == 1
 
-            if current >= target:
-                new_secured = secured + secure_amount
-                await db.execute(
-                    "UPDATE phase_state "
-                    "SET current_phase_profit = 0.0, total_secured_profit = ?, last_reset_time = ? "
-                    "WHERE id = 1",
-                    (new_secured, datetime.now().isoformat()),
-                )
-                await db.commit()
-                self.logger.info(
-                    f"PHASE COMPLETE — Secured ${secure_amount:,.2f} | "
-                    f"Total secured: ${new_secured:,.2f} | Reset to base"
-                )
-            else:
-                self.logger.info(
-                    f"Phase profit ${current:.2f} not yet at target ${target:.2f}"
-                )
+        if secured:
+            state = await self.get_phase_state()
+            self.logger.info(
+                f"PHASE COMPLETE — Secured ${secure_amount:,.2f} | "
+                f"Total secured: ${state.get('total_secured_profit', 0):,.2f} | Reset to base"
+            )
+        else:
+            state = await self.get_phase_state()
+            self.logger.info(
+                f"Phase profit ${state.get('current_phase_profit', 0):.2f} "
+                f"not yet at target ${target:.2f}"
+            )
+        return secured
 
     # ── Markets ───────────────────────────────────────────────────────────────
 
     async def upsert_markets(self, markets: List[Market]):
+        """Insert or update a list of markets in the ``markets`` table."""
         async with aiosqlite.connect(self.db_path) as db:
             for m in markets:
                 lu = m.last_updated.isoformat() if m.last_updated else datetime.now().isoformat()
@@ -327,6 +349,7 @@ class DatabaseManager:
     async def get_eligible_markets(
         self, volume_min: float = 500, max_days_to_expiry: int = 365
     ) -> List[Market]:
+        """Return active markets within the volume and expiry thresholds that have no open position."""
         cutoff_ts = int((datetime.now() + timedelta(days=max_days_to_expiry)).timestamp())
         now_ts = int(datetime.now().timestamp())
         async with aiosqlite.connect(self.db_path) as db:
@@ -352,6 +375,7 @@ class DatabaseManager:
         ]
 
     async def get_markets_with_positions(self) -> set:
+        """Return a set of market_ids that currently have an open position."""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 "SELECT DISTINCT market_id FROM positions WHERE status = 'open'"
@@ -362,7 +386,19 @@ class DatabaseManager:
     # ── Positions ─────────────────────────────────────────────────────────────
 
     async def add_position(self, position: Position) -> Optional[int]:
-        """Insert a new position.  Returns the row-id, or None if duplicate."""
+        """
+        Insert a new position record.
+
+        Uses ``INSERT OR IGNORE`` so a duplicate market_id silently returns
+        ``None`` instead of raising.
+
+        Args:
+            position: ``Position`` dataclass to persist.
+
+        Returns:
+            The new row id, or ``None`` if the market already has an open
+            position or if a database error occurred.
+        """
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 cur = await db.execute(
@@ -385,8 +421,8 @@ class DatabaseManager:
                 )
                 await db.commit()
                 return cur.lastrowid if cur.rowcount > 0 else None
-        except Exception as e:
-            self.logger.error(f"Error adding position for {position.market_id}: {e}")
+        except aiosqlite.Error as exc:
+            self.logger.error(f"DB error adding position for {position.market_id}: {exc}")
             return None
 
     def _row_to_position(self, row) -> Position:
@@ -416,6 +452,7 @@ class DatabaseManager:
         return self._row_to_position(row) if row else None
 
     async def get_open_positions(self) -> List[Position]:
+        """Return all open positions (both paper and live-filled)."""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 """
@@ -429,6 +466,7 @@ class DatabaseManager:
         return [self._row_to_position(r) for r in rows]
 
     async def get_open_live_positions(self) -> List[Position]:
+        """Return open positions that have been confirmed as live fills."""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 """
@@ -671,6 +709,12 @@ class DatabaseManager:
     # ── Daily P&L (circuit-breaker) ───────────────────────────────────────────
 
     async def get_daily_pnl(self) -> float:
+        """
+        Return the sum of realised P&L for today's closed trades.
+
+        Used by the daily-loss circuit-breaker in ``beast_mode_bot.py``.
+        Returns a negative number when the bot is down on the day.
+        """
         today = datetime.now().strftime("%Y-%m-%d")
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
