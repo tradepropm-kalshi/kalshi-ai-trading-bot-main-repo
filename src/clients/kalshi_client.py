@@ -154,10 +154,14 @@ class KalshiClient(TradingLoggerMixin):
                 if not ticker:
                     continue
                 yes_ask = m.get("yes_ask", 0) or m.get("yes_ask_dollars", 0) or 0
-                # Normalise to 0-1 scale
+                # Normalise to 0-1 scale (guard against string values from API)
+                try:
+                    yes_ask = float(yes_ask)
+                except (TypeError, ValueError):
+                    yes_ask = 0.5
                 if yes_ask > 1.0:
                     yes_ask = yes_ask / 100.0
-                yes_ask = max(0.01, min(0.99, float(yes_ask)))
+                yes_ask = max(0.01, min(0.99, yes_ask))
                 opportunities.append({
                     "market_id": ticker,
                     "title": m.get("title", ""),
