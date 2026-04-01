@@ -24,3 +24,4 @@ watchdog>=4.0.0
 
 # Optional but recommended for robustness (no breaking changes)
 python-dotenv>=1.0.0
+json-repair>=0.30.0
