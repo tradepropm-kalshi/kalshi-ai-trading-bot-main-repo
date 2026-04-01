@@ -22,6 +22,16 @@ class APIConfig:
     openai_base_url: str = "https://api.openai.com/v1"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
+    # ── Free real-world data API keys (lean bot enrichment) ───────────────────
+    # The Odds API  — https://the-odds-api.com  (500 req/month free)
+    odds_api_key: str = field(default_factory=lambda: os.getenv("ODDS_API_KEY", ""))
+    # FRED (Federal Reserve)  — https://fred.stlouisfed.org/docs/api/api_key.html
+    fred_api_key: str = field(default_factory=lambda: os.getenv("FRED_API_KEY", ""))
+    # Metaculus  — https://www.metaculus.com/accounts/profile/#apikey  (free)
+    metaculus_api_key: str = field(default_factory=lambda: os.getenv("METACULUS_API_KEY", ""))
+    # NewsAPI  — https://newsapi.org/register  (100 req/day free)
+    newsapi_key: str = field(default_factory=lambda: os.getenv("NEWSAPI_KEY", ""))
+
 
 @dataclass
 class EnsembleConfig:
