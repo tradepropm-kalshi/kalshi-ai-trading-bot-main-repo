@@ -31,6 +31,11 @@ class APIConfig:
     metaculus_api_key: str = field(default_factory=lambda: os.getenv("METACULUS_API_KEY", ""))
     # NewsAPI  — https://newsapi.org/register  (100 req/day free)
     newsapi_key: str = field(default_factory=lambda: os.getenv("NEWSAPI_KEY", ""))
+    # BLS (Bureau of Labor Statistics) — https://data.bls.gov/registrationEngine/ (free)
+    # v1 works without a key; v2 (higher limits) requires free registration
+    bls_api_key: str = field(default_factory=lambda: os.getenv("BLS_API_KEY", ""))
+    # Jolpica F1, Manifold, PredictIt, NWS — no API key required (leave blank)
+    # These are included here for documentation purposes only.
 
 
 @dataclass

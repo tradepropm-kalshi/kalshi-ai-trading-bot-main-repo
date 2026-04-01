@@ -20,6 +20,12 @@ Data sources (all free-tier / no-auth-required where possible):
   Metaculus        — Crowdsourced long-range predictions (free API key)
   CoinGecko        — Crypto prices + sentiment (free, no auth)
   NewsAPI          — Breaking news headlines (free tier: 100 req/day)
+  MLBStatsClient   — Official MLB API: pitchers, scores, standings (no auth)
+  JolpicaF1Client  — F1 lap times, standings, results (no auth, 200 req/hr)
+  ManifoldClient   — Manifold Markets probabilities (no auth, 500 req/min)
+  PredictItClient  — PredictIt political market prices (no auth)
+  NWSClient        — National Weather Service official US forecasts (no auth)
+  BLSClient        — Bureau of Labor Statistics: CPI, jobs, PPI (free key)
 """
 
 import asyncio
@@ -1136,3 +1142,710 @@ class MLBStatsClient:
                 )
 
         return "\n".join(lines)
+
+
+# ===========================================================================
+# Jolpica F1 API — official Ergast replacement, free, no auth
+# ===========================================================================
+
+class JolpicaF1Client:
+    """
+    Fetch F1 driver standings, race results, and qualifying data.
+
+    Jolpica is the community-maintained replacement for the now-defunct
+    Ergast API.  All F1 data since 1950, updated in real-time during race
+    weekends.
+
+    No authentication required.
+    Rate limit: 200 requests/hour.
+
+    Usage::
+
+        f1 = JolpicaF1Client()
+        standings = await f1.get_driver_standings()
+        last_result = await f1.get_last_race_result()
+        next_race = await f1.get_next_race()
+    """
+
+    BASE = "https://api.jolpi.ca/ergast/f1"
+
+    async def get_driver_standings(self, season: str = "current") -> List[Dict]:
+        """
+        Fetch current F1 World Drivers' Championship standings.
+
+        Args:
+            season: Year string or ``"current"`` for the active season.
+
+        Returns:
+            List of standing dicts: ``position``, ``driver``, ``team``,
+            ``points``, ``wins``.
+        """
+        try:
+            async with _client() as http:
+                r = await http.get(
+                    f"{self.BASE}/{season}/driverStandings.json"
+                )
+                if r.status_code != 200:
+                    return []
+                tables = (
+                    r.json()
+                    .get("MRData", {})
+                    .get("StandingsTable", {})
+                    .get("StandingsLists", [{}])
+                )
+                if not tables:
+                    return []
+                results = []
+                for entry in tables[0].get("DriverStandings", [])[:10]:
+                    driver = entry.get("Driver", {})
+                    team   = entry.get("Constructors", [{}])[0]
+                    results.append({
+                        "position": entry.get("position", "?"),
+                        "driver":   f"{driver.get('givenName','')} {driver.get('familyName','')}".strip(),
+                        "team":     team.get("name", "?"),
+                        "points":   entry.get("points", "0"),
+                        "wins":     entry.get("wins", "0"),
+                    })
+                return results
+        except Exception as exc:
+            logger.debug(f"JolpicaF1 standings failed: {exc}")
+            return []
+
+    async def get_constructor_standings(self, season: str = "current") -> List[Dict]:
+        """
+        Fetch F1 Constructors' Championship standings.
+
+        Returns:
+            List of dicts: ``position``, ``team``, ``points``, ``wins``.
+        """
+        try:
+            async with _client() as http:
+                r = await http.get(
+                    f"{self.BASE}/{season}/constructorStandings.json"
+                )
+                if r.status_code != 200:
+                    return []
+                tables = (
+                    r.json()
+                    .get("MRData", {})
+                    .get("StandingsTable", {})
+                    .get("StandingsLists", [{}])
+                )
+                if not tables:
+                    return []
+                return [
+                    {
+                        "position": e.get("position", "?"),
+                        "team":     e.get("Constructor", {}).get("name", "?"),
+                        "points":   e.get("points", "0"),
+                        "wins":     e.get("wins", "0"),
+                    }
+                    for e in tables[0].get("ConstructorStandings", [])[:10]
+                ]
+        except Exception as exc:
+            logger.debug(f"JolpicaF1 constructor standings failed: {exc}")
+            return []
+
+    async def get_last_race_result(self) -> List[Dict]:
+        """
+        Fetch the finishing order of the most recent F1 race.
+
+        Returns:
+            List of result dicts: ``position``, ``driver``, ``team``,
+            ``grid``, ``status``, ``points``.
+        """
+        try:
+            async with _client() as http:
+                r = await http.get(f"{self.BASE}/current/last/results.json")
+                if r.status_code != 200:
+                    return []
+                races = (
+                    r.json()
+                    .get("MRData", {})
+                    .get("RaceTable", {})
+                    .get("Races", [])
+                )
+                if not races:
+                    return []
+                results = []
+                for res in races[0].get("Results", [])[:10]:
+                    driver = res.get("Driver", {})
+                    team   = res.get("Constructor", {})
+                    results.append({
+                        "position": res.get("position", "?"),
+                        "driver":   f"{driver.get('givenName','')} {driver.get('familyName','')}".strip(),
+                        "team":     team.get("name", "?"),
+                        "grid":     res.get("grid", "?"),
+                        "status":   res.get("status", "?"),
+                        "points":   res.get("points", "0"),
+                        "race":     races[0].get("raceName", "?"),
+                        "circuit":  races[0].get("Circuit", {}).get("circuitName", "?"),
+                    })
+                return results
+        except Exception as exc:
+            logger.debug(f"JolpicaF1 last result failed: {exc}")
+            return []
+
+    async def get_next_race(self) -> Optional[Dict]:
+        """
+        Fetch the next scheduled F1 race on the calendar.
+
+        Returns:
+            Dict with ``name``, ``circuit``, ``location``, ``country``,
+            ``date``, ``time``, or None if the season is over.
+        """
+        try:
+            async with _client() as http:
+                r = await http.get(f"{self.BASE}/current.json")
+                if r.status_code != 200:
+                    return None
+                races = (
+                    r.json()
+                    .get("MRData", {})
+                    .get("RaceTable", {})
+                    .get("Races", [])
+                )
+                now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                for race in races:
+                    if race.get("date", "") >= now_str:
+                        circuit = race.get("Circuit", {})
+                        loc     = circuit.get("Location", {})
+                        return {
+                            "name":    race.get("raceName", "?"),
+                            "circuit": circuit.get("circuitName", "?"),
+                            "location": loc.get("locality", "?"),
+                            "country": loc.get("country", "?"),
+                            "date":    race.get("date", "?"),
+                            "time":    race.get("time", "TBD"),
+                        }
+                return None
+        except Exception as exc:
+            logger.debug(f"JolpicaF1 next race failed: {exc}")
+            return None
+
+    def format_context(
+        self,
+        standings: List[Dict],
+        last_result: List[Dict],
+        next_race: Optional[Dict],
+    ) -> str:
+        """Format F1 data into a compact AI-prompt context string."""
+        lines: List[str] = []
+
+        if next_race:
+            lines.append(
+                f"Next F1 race: {next_race['name']} at {next_race['circuit']}, "
+                f"{next_race['location']}, {next_race['country']} on {next_race['date']}"
+            )
+
+        if last_result:
+            race_name = last_result[0].get("race", "Last race")
+            lines.append(f"Last race result ({race_name}):")
+            for r in last_result[:5]:
+                lines.append(
+                    f"  P{r['position']:>2}: {r['driver']} ({r['team']}) "
+                    f"— started P{r['grid']}, {r['status']}, {r['points']}pts"
+                )
+
+        if standings:
+            lines.append("Drivers' Championship:")
+            for s in standings[:5]:
+                lines.append(
+                    f"  P{s['position']:>2}: {s['driver']} ({s['team']}) "
+                    f"— {s['points']}pts, {s['wins']} wins"
+                )
+
+        return "\n".join(lines)
+
+
+# ===========================================================================
+# Manifold Markets API — free prediction market probabilities, no auth
+# ===========================================================================
+
+class ManifoldClient:
+    """
+    Fetch live market probabilities from Manifold Markets.
+
+    Manifold is a play-money prediction market with active political,
+    sports, and tech markets.  Its community probabilities provide a
+    second cross-reference beyond Polymarket, especially for niche
+    political and speculative markets that Polymarket doesn't cover.
+
+    No authentication required.
+    Rate limit: 500 requests/minute per IP.
+
+    Usage::
+
+        mf = ManifoldClient()
+        markets = await mf.search_markets("Super Bowl 2026")
+    """
+
+    BASE = "https://api.manifold.markets/v0"
+
+    async def search_markets(self, query: str, limit: int = 3) -> List[Dict]:
+        """
+        Search Manifold for markets matching *query*.
+
+        Args:
+            query: Search string (e.g. ``"Who wins the Masters 2026"``).
+            limit: Maximum results to return.
+
+        Returns:
+            List of market dicts with keys: ``question``, ``probability``,
+            ``volume``, ``close_time``, ``url``.
+        """
+        try:
+            async with _client() as http:
+                r = await http.get(
+                    f"{self.BASE}/search-markets",
+                    params={"term": query, "limit": limit, "sort": "liquidity"},
+                )
+                if r.status_code != 200:
+                    return []
+                markets = r.json() if isinstance(r.json(), list) else []
+                results = []
+                for m in markets[:limit]:
+                    prob = m.get("probability")
+                    results.append({
+                        "question":    m.get("question", "?")[:100],
+                        "probability": round(prob, 3) if prob is not None else None,
+                        "volume":      m.get("volume", 0),
+                        "close_time":  m.get("closeTime", ""),
+                        "url":         m.get("url", ""),
+                        "source":      "manifold",
+                    })
+                return results
+        except Exception as exc:
+            logger.debug(f"Manifold search failed: {exc}")
+            return []
+
+    def format_context(self, markets: List[Dict]) -> str:
+        """Format Manifold markets as a compact context string."""
+        if not markets:
+            return ""
+        lines = ["Manifold Markets community odds:"]
+        for m in markets[:3]:
+            prob = m.get("probability")
+            prob_str = f"{prob:.0%}" if prob is not None else "N/A"
+            vol  = m.get("volume", 0)
+            lines.append(
+                f"  {m['question']}: {prob_str} YES "
+                f"(vol M${vol:,.0f})"
+            )
+        return "\n".join(lines)
+
+
+# ===========================================================================
+# PredictIt API — political market prices, no auth required
+# ===========================================================================
+
+class PredictItClient:
+    """
+    Fetch live contract prices from PredictIt.
+
+    PredictIt is a regulated real-money prediction market focused almost
+    exclusively on US political events.  Their public API returns current
+    Yes/No prices for all open markets — no authentication required.
+
+    Non-commercial use only per PredictIt's terms of service.
+    Rate limit: Not formally stated; use conservatively.
+
+    Usage::
+
+        pi = PredictItClient()
+        markets = await pi.get_all_markets()
+        political = await pi.search_markets("Senate")
+    """
+
+    BASE = "https://www.predictit.org/api/marketdata"
+
+    async def get_all_markets(self) -> List[Dict]:
+        """
+        Fetch all open PredictIt markets with current prices.
+
+        Returns:
+            List of market dicts with keys: ``name``, ``contracts``
+            (list of contract dicts: ``name``, ``yes_price``, ``no_price``).
+        """
+        try:
+            async with _client() as http:
+                r = await http.get(f"{self.BASE}/all/")
+                if r.status_code != 200:
+                    return []
+                return r.json().get("markets", [])
+        except Exception as exc:
+            logger.debug(f"PredictIt get_all_markets failed: {exc}")
+            return []
+
+    async def search_markets(self, query: str) -> List[Dict]:
+        """
+        Filter PredictIt markets whose name contains *query*.
+
+        Args:
+            query: Case-insensitive search string.
+
+        Returns:
+            Filtered list of market dicts (same format as :meth:`get_all_markets`).
+        """
+        all_markets = await self.get_all_markets()
+        query_lower = query.lower()
+        return [
+            m for m in all_markets
+            if query_lower in (m.get("name") or "").lower()
+        ]
+
+    def format_context(self, markets: List[Dict], query: str = "") -> str:
+        """Format PredictIt markets as a compact context string."""
+        if not markets:
+            return ""
+        lines = ["PredictIt (real-money political market):"]
+        for mkt in markets[:3]:
+            mkt_name = (mkt.get("name") or "?")[:70]
+            contracts = mkt.get("contracts", [])
+            for c in contracts[:2]:
+                c_name   = (c.get("name") or "?")[:50]
+                yes_p    = c.get("bestYesBid") or c.get("lastTradePrice") or "?"
+                no_p     = c.get("bestNoBid") or "?"
+                yes_str  = f"{float(yes_p):.0%}" if yes_p != "?" else "N/A"
+                no_str   = f"{float(no_p):.0%}"  if no_p  != "?" else "N/A"
+                lines.append(f"  {mkt_name} — {c_name}: YES {yes_str} / NO {no_str}")
+        return "\n".join(lines)
+
+
+# ===========================================================================
+# National Weather Service API — official US government weather, no auth
+# ===========================================================================
+
+class NWSClient:
+    """
+    Fetch official US weather forecasts from the National Weather Service.
+
+    More authoritative than Open-Meteo for US venues because NWS is the
+    primary source that all US weather apps pull from.  Especially valuable
+    for outdoor sports markets (baseball, golf, F1 street circuits) where
+    precipitation and wind are decisive factors.
+
+    No authentication required.  User-Agent header must be set (done by
+    the shared ``_client()`` factory).
+    Rate limit: Reasonable use, no formal cap stated.
+
+    Usage::
+
+        nws = NWSClient()
+        forecast = await nws.get_forecast_by_coords(41.83, -87.63)  # Wrigley
+    """
+
+    BASE = "https://api.weather.gov"
+
+    # Pre-resolved grid points for common sports venues
+    # Format: (wfo, gridX, gridY) — avoids an extra /points lookup per call
+    VENUE_GRIDS: Dict[str, tuple] = {
+        # MLB ballparks
+        "wrigley":         ("LOT", 76, 73),   # Chicago Cubs
+        "fenway":          ("BOX", 69, 83),   # Boston Red Sox
+        "yankee":          ("OKX", 37, 40),   # New York Yankees
+        "dodger":          ("LOX", 149, 48),  # Los Angeles Dodgers
+        "oracle park":     ("MTR", 95, 90),   # San Francisco Giants
+        "petco":           ("SGX", 62, 16),   # San Diego Padres
+        "coors field":     ("BOU", 59, 60),   # Colorado Rockies
+        "truist park":     ("FFC", 59, 80),   # Atlanta Braves
+        "globe life":      ("FWD", 97, 97),   # Texas Rangers
+        # Golf venues
+        "augusta":         ("CAE", 89, 71),   # Masters
+        "pebble beach":    ("MTR", 59, 24),   # AT&T Pebble Beach
+        "torrey pines":    ("SGX", 53, 24),   # Farmers Insurance
+        # Racetracks
+        "charlotte motor": ("GSP", 49, 56),   # NASCAR Charlotte
+        "daytona":         ("MLB", 64, 54),   # Daytona 500
+        "miami gardens":   ("MFL", 28, 20),   # F1 Miami GP
+        "cota":            ("EWX", 155, 92),  # F1 US GP (Austin)
+    }
+
+    async def get_forecast_by_coords(
+        self, lat: float, lon: float
+    ) -> Optional[Dict]:
+        """
+        Fetch a 7-day forecast for geographic coordinates.
+
+        Two-step process: first resolves coordinates to an NWS grid point,
+        then fetches the grid forecast.
+
+        Args:
+            lat: Latitude (decimal degrees).
+            lon: Longitude (decimal degrees, negative = West).
+
+        Returns:
+            Dict with ``periods`` list (each period has ``name``,
+            ``temperature``, ``windSpeed``, ``shortForecast``,
+            ``detailedForecast``), or None on failure.
+        """
+        try:
+            async with _client() as http:
+                # Step 1: resolve coords → grid
+                points_r = await http.get(
+                    f"{self.BASE}/points/{lat:.4f},{lon:.4f}"
+                )
+                if points_r.status_code != 200:
+                    return None
+                props    = points_r.json().get("properties", {})
+                wfo      = props.get("gridId")
+                grid_x   = props.get("gridX")
+                grid_y   = props.get("gridY")
+                if not all([wfo, grid_x, grid_y]):
+                    return None
+
+                # Step 2: fetch forecast
+                fc_r = await http.get(
+                    f"{self.BASE}/gridpoints/{wfo}/{grid_x},{grid_y}/forecast"
+                )
+                if fc_r.status_code != 200:
+                    return None
+                periods = fc_r.json().get("properties", {}).get("periods", [])
+                return {"periods": periods[:6]}
+        except Exception as exc:
+            logger.debug(f"NWS forecast failed ({lat},{lon}): {exc}")
+            return None
+
+    async def get_forecast_by_venue(self, venue_hint: str) -> Optional[Dict]:
+        """
+        Fetch forecast for a known sports venue by name hint.
+
+        Looks up pre-resolved NWS grid points for common ballparks, golf
+        courses, and racetracks, avoiding an extra network call.
+
+        Args:
+            venue_hint: Partial venue or city name (case-insensitive).
+
+        Returns:
+            Same format as :meth:`get_forecast_by_coords`, or None if
+            the venue isn't in the pre-resolved table.
+        """
+        hint_lower = venue_hint.lower()
+        grid = None
+        for key, g in self.VENUE_GRIDS.items():
+            if key in hint_lower:
+                grid = g
+                break
+        if not grid:
+            return None
+        wfo, gx, gy = grid
+        try:
+            async with _client() as http:
+                fc_r = await http.get(
+                    f"{self.BASE}/gridpoints/{wfo}/{gx},{gy}/forecast"
+                )
+                if fc_r.status_code != 200:
+                    return None
+                periods = fc_r.json().get("properties", {}).get("periods", [])
+                return {"periods": periods[:6]}
+        except Exception as exc:
+            logger.debug(f"NWS venue forecast failed ({venue_hint}): {exc}")
+            return None
+
+    def format_context(self, forecast: Optional[Dict], venue: str = "") -> str:
+        """Format an NWS forecast into a compact context string."""
+        if not forecast:
+            return ""
+        periods = forecast.get("periods", [])
+        if not periods:
+            return ""
+        label = f" at {venue}" if venue else ""
+        lines = [f"NWS official forecast{label}:"]
+        for p in periods[:4]:
+            name  = p.get("name", "")
+            temp  = p.get("temperature", "?")
+            unit  = p.get("temperatureUnit", "F")
+            wind  = p.get("windSpeed", "")
+            short = p.get("shortForecast", "")
+            lines.append(f"  {name}: {temp}°{unit}, wind {wind} — {short}")
+        return "\n".join(lines)
+
+
+# ===========================================================================
+# BLS API — Bureau of Labor Statistics, free registration key
+# ===========================================================================
+
+class BLSClient:
+    """
+    Fetch official US economic statistics from the Bureau of Labor Statistics.
+
+    Provides the actual CPI, PPI, jobs, and unemployment numbers that Kalshi
+    economic markets resolve against.  Although the bot blocks trading on
+    pure economic markets, this data is valuable for *calibrating* political
+    and sector markets that are influenced by economic conditions.
+
+    Free registration key required (https://data.bls.gov/registrationEngine/).
+    v1 (no key) is available but has lower rate limits and fewer features.
+
+    Rate limits (v2 with key):
+      - 500 queries/day
+      - 50 series per query
+      - 20 years of data per query
+
+    Common series IDs:
+      CUUR0000SA0   — CPI-U All Items (headline inflation)
+      CUSR0000SA0   — CPI-U Seasonally Adjusted
+      CES0000000001 — Total nonfarm payrolls (NFP)
+      LNS14000000   — Unemployment rate (U-3)
+      WPUFD49104    — PPI Final Demand
+      FEDFUNDS      — (FRED, not BLS) — use FREDClient for fed funds rate
+
+    Usage::
+
+        bls = BLSClient(api_key="your_free_key")
+        cpi = await bls.get_latest("CUUR0000SA0")
+        nfp = await bls.get_latest("CES0000000001")
+    """
+
+    BASE = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+
+    # The most useful series for prediction market context
+    SERIES = {
+        "cpi":          "CUUR0000SA0",   # CPI-U All Items
+        "cpi_sa":       "CUSR0000SA0",   # CPI-U Seasonally Adjusted
+        "nfp":          "CES0000000001", # Nonfarm Payrolls
+        "unemployment": "LNS14000000",   # Unemployment Rate (U-3)
+        "u6":           "LNS13327709",   # U-6 Underemployment
+        "ppi":          "WPUFD49104",    # PPI Final Demand
+        "wages":        "CES0500000003", # Average hourly earnings
+        "jolts":        "JTS000000000000000JOL",  # Job openings
+    }
+
+    def __init__(self, api_key: str = "") -> None:
+        self.api_key = api_key or ""
+
+    async def get_latest(self, series_id: str, periods: int = 3) -> Optional[Dict]:
+        """
+        Fetch the most recent observations for a BLS series.
+
+        Args:
+            series_id: BLS series ID string (e.g. ``"CUUR0000SA0"``).
+            periods:   Number of recent periods to return (default 3).
+
+        Returns:
+            Dict with ``series_id``, ``latest_value``, ``latest_period``,
+            ``previous_value``, ``change``, ``change_pct``, or None on failure.
+        """
+        try:
+            payload: Dict[str, Any] = {
+                "seriesid": [series_id],
+                "latest":   True,
+            }
+            if self.api_key:
+                payload["registrationkey"] = self.api_key
+
+            async with _client() as http:
+                r = await http.post(
+                    self.BASE,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                if r.status_code != 200:
+                    return None
+                data    = r.json()
+                results = data.get("Results", {}).get("series", [])
+                if not results:
+                    return None
+                series  = results[0]
+                obs     = series.get("data", [])
+                if len(obs) < 1:
+                    return None
+                latest   = obs[0]
+                prev     = obs[1] if len(obs) > 1 else {}
+                try:
+                    val  = float(latest.get("value", "0").replace(",", ""))
+                    pval = float(prev.get("value", "0").replace(",", "")) if prev else val
+                    chg  = val - pval
+                    chg_pct = (chg / pval * 100) if pval else 0.0
+                except (ValueError, ZeroDivisionError):
+                    val = pval = chg = chg_pct = 0.0
+                return {
+                    "series_id":      series_id,
+                    "latest_value":   val,
+                    "latest_period":  f"{latest.get('periodName','')} {latest.get('year','')}",
+                    "previous_value": pval,
+                    "change":         chg,
+                    "change_pct":     chg_pct,
+                }
+        except Exception as exc:
+            logger.debug(f"BLS get_latest failed ({series_id}): {exc}")
+            return None
+
+    async def get_multiple(self, series_ids: List[str]) -> Dict[str, Optional[Dict]]:
+        """
+        Fetch latest values for multiple BLS series in one request.
+
+        Args:
+            series_ids: List of BLS series ID strings (max 50 per request).
+
+        Returns:
+            Dict mapping each series_id to its result dict (or None on failure).
+        """
+        try:
+            payload: Dict[str, Any] = {
+                "seriesid": series_ids[:50],
+                "latest":   True,
+            }
+            if self.api_key:
+                payload["registrationkey"] = self.api_key
+
+            async with _client() as http:
+                r = await http.post(
+                    self.BASE,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                if r.status_code != 200:
+                    return {sid: None for sid in series_ids}
+                data    = r.json()
+                series_list = data.get("Results", {}).get("series", [])
+                results = {}
+                for series in series_list:
+                    sid  = series.get("seriesID", "")
+                    obs  = series.get("data", [])
+                    if not obs:
+                        results[sid] = None
+                        continue
+                    latest = obs[0]
+                    prev   = obs[1] if len(obs) > 1 else {}
+                    try:
+                        val  = float(latest.get("value", "0").replace(",", ""))
+                        pval = float(prev.get("value","0").replace(",","")) if prev else val
+                        chg  = val - pval
+                        chg_pct = (chg / pval * 100) if pval else 0.0
+                    except (ValueError, ZeroDivisionError):
+                        val = pval = chg = chg_pct = 0.0
+                    results[sid] = {
+                        "series_id":      sid,
+                        "latest_value":   val,
+                        "latest_period":  f"{latest.get('periodName','')} {latest.get('year','')}",
+                        "change":         chg,
+                        "change_pct":     chg_pct,
+                    }
+                # Fill missing
+                for sid in series_ids:
+                    results.setdefault(sid, None)
+                return results
+        except Exception as exc:
+            logger.debug(f"BLS get_multiple failed: {exc}")
+            return {sid: None for sid in series_ids}
+
+    def format_context(self, series_data: Dict[str, Optional[Dict]]) -> str:
+        """Format BLS series data into a compact context string."""
+        # Reverse-map series IDs to human names
+        name_map = {v: k for k, v in self.SERIES.items()}
+        lines: List[str] = ["BLS economic indicators (official):"]
+        for sid, data in series_data.items():
+            if not data:
+                continue
+            name    = name_map.get(sid, sid)
+            val     = data["latest_value"]
+            period  = data["latest_period"]
+            chg     = data["change"]
+            chg_pct = data["change_pct"]
+            dir_sym = "▲" if chg >= 0 else "▼"
+            lines.append(
+                f"  {name.upper():12} {val:.2f} ({period}) "
+                f"{dir_sym}{abs(chg_pct):.2f}% MoM"
+            )
+        return "\n".join(lines) if len(lines) > 1 else ""

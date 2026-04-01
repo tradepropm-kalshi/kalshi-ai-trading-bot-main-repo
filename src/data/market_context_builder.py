@@ -26,15 +26,20 @@ import re
 from typing import Dict, List, Optional
 
 from src.data.free_data_sources import (
+    BLSClient,
     CoinGeckoClient,
     ESPNClient,
     FREDClient,
+    JolpicaF1Client,
+    ManifoldClient,
     MetaculusClient,
     MLBStatsClient,
     NewsAPIClient,
+    NWSClient,
     OddsAPIClient,
     OpenMeteoClient,
     PolymarketClient,
+    PredictItClient,
 )
 from src.utils.database import Market
 from src.utils.logging_setup import get_trading_logger
@@ -199,11 +204,13 @@ class MarketContextBuilder:
         fred_api_key: str = "",
         newsapi_key: str = "",
         metaculus_api_key: str = "",
+        bls_api_key: str = "",
     ) -> None:
         self._odds_key      = odds_api_key
         self._fred_key      = fred_api_key
         self._newsapi_key   = newsapi_key
         self._metaculus_key = metaculus_api_key
+        self._bls_key       = bls_api_key
 
     # ------------------------------------------------------------------
     # Public API
@@ -251,10 +258,20 @@ class MarketContextBuilder:
             tasks["crypto"]  = self._get_crypto_context(market.title)
 
         if any(k in category for k in ("politics", "election")):
-            tasks["meta"]    = self._get_metaculus_context(market.title)
+            tasks["meta"]      = self._get_metaculus_context(market.title)
+            tasks["predictit"] = self._get_predictit_context(market.title)
 
-        # Cross-reference on Polymarket regardless of category
-        tasks["poly"]  = self._get_polymarket_context(market.title)
+        # F1 gets dedicated Jolpica data (more detailed than ESPN)
+        if sport_slug and sport_slug[1] in ("f1", "indycar"):
+            tasks["f1"] = self._get_f1_context(market.title)
+
+        # Cross-reference on Polymarket + Manifold for all markets
+        tasks["poly"]    = self._get_polymarket_context(market.title)
+        tasks["manifold"] = self._get_manifold_context(market.title)
+
+        # NWS weather for outdoor US sports (more authoritative than Open-Meteo)
+        if sport_slug and sport_slug[0] in ("baseball", "golf", "racing"):
+            tasks["nws"] = self._get_nws_context(market.title)
 
         # Headlines for high-volume markets
         if volume >= _NEWS_VOLUME_THRESHOLD and self._newsapi_key:
@@ -728,6 +745,80 @@ class MarketContextBuilder:
             if headline:
                 lines.append(f"  [{source}] {headline}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Manifold Markets cross-reference
+    # ------------------------------------------------------------------
+
+    async def _get_manifold_context(self, title: str) -> str:
+        """Fetch Manifold Markets community probability as a second cross-reference."""
+        mf = ManifoldClient()
+        markets = await mf.search_markets(title, limit=2)
+        if not markets:
+            return ""
+        lines = ["Manifold community odds (play-money):"]
+        for m in markets:
+            prob = m.get("probability")
+            prob_str = f"{prob:.0%}" if prob is not None else "N/A"
+            vol  = m.get("volume", 0)
+            lines.append(
+                f"  {m['question'][:80]}: {prob_str} YES "
+                f"(M${vol:,.0f} vol)"
+            )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # PredictIt cross-reference (politics only)
+    # ------------------------------------------------------------------
+
+    async def _get_predictit_context(self, title: str) -> str:
+        """Fetch PredictIt real-money political market prices."""
+        pi = PredictItClient()
+        # Use first 3 keywords from title as search
+        keywords = " ".join(title.split()[:4])
+        markets = await pi.search_markets(keywords)
+        if not markets:
+            return ""
+        return pi.format_context(markets[:2], query=title)
+
+    # ------------------------------------------------------------------
+    # F1 context via Jolpica (more detailed than ESPN)
+    # ------------------------------------------------------------------
+
+    async def _get_f1_context(self, title: str) -> str:
+        """Fetch F1 driver standings, last race result, and next race info."""
+        f1 = JolpicaF1Client()
+        standings, last_result, next_race = await asyncio.gather(
+            f1.get_driver_standings(),
+            f1.get_last_race_result(),
+            f1.get_next_race(),
+            return_exceptions=True,
+        )
+        if isinstance(standings, Exception):
+            standings = []
+        if isinstance(last_result, Exception):
+            last_result = []
+        if isinstance(next_race, Exception):
+            next_race = None
+        return f1.format_context(standings, last_result, next_race)
+
+    # ------------------------------------------------------------------
+    # NWS weather (US outdoor venues)
+    # ------------------------------------------------------------------
+
+    async def _get_nws_context(self, title: str) -> str:
+        """
+        Fetch NWS official forecast for the venue in the market title.
+
+        Tries venue-name lookup first (fast, pre-resolved grid), then falls
+        back to Open-Meteo if the venue isn't in the pre-resolved table.
+        """
+        nws = NWSClient()
+        # Try pre-resolved venue grid first
+        forecast = await nws.get_forecast_by_venue(title.lower())
+        if forecast:
+            return nws.format_context(forecast, venue=title[:40])
+        return ""
 
     # ------------------------------------------------------------------
     # Detection helpers

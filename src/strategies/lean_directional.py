@@ -125,6 +125,7 @@ class LeanDirectionalStrategy:
             fred_api_key=getattr(settings.api, "fred_api_key", ""),
             newsapi_key=getattr(settings.api, "newsapi_key", ""),
             metaculus_api_key=getattr(settings.api, "metaculus_api_key", ""),
+            bls_api_key=getattr(settings.api, "bls_api_key", ""),
         )
 
     # ------------------------------------------------------------------
