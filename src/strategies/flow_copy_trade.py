@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Tuple
 
 import aiosqlite
 
+from src.clients.claude_client import ClaudeClient
 from src.data.kalshi_trade_feed import BlockSignal, KalshiTradeFeed
 from src.utils.database import DatabaseManager
 from src.clients.kalshi_client import KalshiClient
@@ -83,6 +84,7 @@ class FlowCopyTradeStrategy:
     kalshi : KalshiClient
     xai : XAIClient
     feed : KalshiTradeFeed  — the running trade-feed scanner
+    claude : ClaudeClient   — optional; adds Haiku 4.5 as a second veto layer
     live : bool             — True = real orders, False = paper
     position_cap : int      — override BEAST_MAX_POSITIONS
     """
@@ -93,12 +95,14 @@ class FlowCopyTradeStrategy:
         kalshi: KalshiClient,
         xai: XAIClient,
         feed: KalshiTradeFeed,
+        claude: Optional[ClaudeClient] = None,
         live: bool = False,
         position_cap: int = BEAST_MAX_POSITIONS,
     ) -> None:
         self.db = db
         self.kalshi = kalshi
         self.xai = xai
+        self.claude = claude
         self.feed = feed
         self.live = live
         self.position_cap = position_cap
@@ -335,10 +339,11 @@ class FlowCopyTradeStrategy:
 
     async def _ai_confirm(self, sig: BlockSignal) -> Tuple[float, str]:
         """
-        Ask the AI for a quick yes/no confirmation on the signal.
+        Dual-model signal gate: Grok-3 first, then Claude Haiku 4.5.
 
-        Prompt is intentionally tiny (< 200 tokens) so this adds
-        < $0.002 per signal check.
+        Both models must say CONFIRM for the trade to proceed.
+        If Claude is unavailable, falls back to Grok-only mode.
+        Prompt is intentionally tiny (< 200 tokens): < $0.002 per check.
         """
         direction_label = "YES" if sig.direction == "yes" else "NO"
         prompt = (
@@ -349,6 +354,9 @@ class FlowCopyTradeStrategy:
             f"Should I copy this trade? Reply: CONFIRM or SKIP, then one sentence why."
         )
 
+        # ── Step 1: Grok-3 confirmation ───────────────────────────────────────
+        grok_conf = 0.55
+        grok_rationale = "Grok unavailable"
         try:
             text = await self.xai.get_completion(
                 prompt=prompt,
@@ -358,25 +366,61 @@ class FlowCopyTradeStrategy:
                 market_id=sig.market_id,
             )
             if not text:
-                return 0.6, "AI returned empty response — proceeding on signal strength"
-
-            upper = text.upper()
-            # Parse decision and extract any numeric confidence
-            if "SKIP" in upper and "CONFIRM" not in upper:
-                confidence = 0.40
-            elif "CONFIRM" in upper:
-                confidence = 0.72
+                grok_conf = 0.6
+                grok_rationale = "Grok returned empty — proceeding on signal strength"
             else:
-                confidence = 0.55  # neutral
-
-            # Boost confidence based on signal strength
-            strength_bonus = (sig.signal_strength - 50) / 500  # ±0.10
-            confidence = max(0.0, min(1.0, confidence + strength_bonus))
-
-            return confidence, text[:300]
+                upper = text.upper()
+                if "SKIP" in upper and "CONFIRM" not in upper:
+                    # Grok says skip — no need to call Claude
+                    logger.info(
+                        "Grok SKIP %s %s — early exit", sig.signal_type, sig.market_id
+                    )
+                    return 0.40, text[:300]
+                elif "CONFIRM" in upper:
+                    grok_conf = 0.72
+                grok_rationale = text[:300]
         except Exception as exc:
-            logger.warning("AI confirm failed for %s: %s — proceeding with 0.6", sig.market_id, exc)
-            return 0.6, "AI unavailable — proceeding on signal strength"
+            logger.warning(
+                "Grok confirm failed for %s: %s — proceeding with 0.6", sig.market_id, exc
+            )
+            grok_conf = 0.6
+            grok_rationale = "Grok unavailable — proceeding on signal strength"
+
+        # Apply signal-strength bonus to Grok confidence
+        strength_bonus = (sig.signal_strength - 50) / 500  # ±0.10
+        grok_conf = max(0.0, min(1.0, grok_conf + strength_bonus))
+
+        # ── Step 2: Claude Haiku veto (if available) ──────────────────────────
+        if self.claude and self.claude.available:
+            try:
+                claude_text, _ = await self.claude.get_fast_confirmation(
+                    prompt=prompt,
+                    market_id=sig.market_id,
+                )
+                if claude_text:
+                    upper = claude_text.upper()
+                    if "SKIP" in upper and "CONFIRM" not in upper:
+                        logger.info(
+                            "Claude Haiku VETOED signal %s %s — skipping",
+                            sig.signal_type,
+                            sig.market_id,
+                        )
+                        return 0.35, f"Claude vetoed: {claude_text[:200]}"
+
+                    # Both confirmed — average the confidences
+                    haiku_conf = 0.70 if "CONFIRM" in upper else 0.55
+                    blended = 0.5 * grok_conf + 0.5 * haiku_conf
+                    logger.debug(
+                        "Dual confirm %s  grok=%.2f haiku=%.2f blend=%.2f",
+                        sig.market_id, grok_conf, haiku_conf, blended,
+                    )
+                    return blended, f"[Dual] {grok_rationale}"
+            except Exception as exc:
+                logger.debug("Claude Haiku confirm error %s: %s", sig.market_id, exc)
+                # Fall through to Grok-only result
+
+        # Grok-only path (Claude absent or errored)
+        return grok_conf, grok_rationale
 
     # ------------------------------------------------------------------
     # Position sizing (Kelly)

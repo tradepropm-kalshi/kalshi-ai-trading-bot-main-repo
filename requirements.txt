@@ -14,6 +14,9 @@ streamlit>=1.42.0
 # xAI / Grok integration (critical for your AI ensemble and phase decisions)
 xai-sdk
 
+# Anthropic / Claude integration (dual-model consensus)
+anthropic>=0.40.0
+
 # Kalshi & trading helpers
 ratelimit>=0.9.0
 websockets>=12.0

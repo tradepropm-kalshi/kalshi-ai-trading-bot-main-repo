@@ -68,6 +68,33 @@ async def test_xai(key: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+async def test_anthropic(key: str) -> tuple[bool, str]:
+    if not key:
+        return None, "Not set (optional — enables dual-model consensus)"
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5",
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "Reply: ok"}],
+                },
+            )
+        if r.status_code == 200:
+            return True, "Connected — Claude Haiku responded"
+        if r.status_code == 401:
+            return False, "Invalid key (401 Unauthorized)"
+        return False, f"HTTP {r.status_code}: {r.text[:100]}"
+    except Exception as e:
+        return False, str(e)
+
+
 async def test_newsapi(key: str) -> tuple[bool, str]:
     if not key:
         return None, "Not set (optional)"
@@ -193,6 +220,14 @@ async def main():
     tag = PASS if ok else FAIL
     print(f"{tag}  xAI / Grok    {msg}")
     results.append(("xAI", ok))
+
+    # ── Optional AI key ──────────────────────────────────────
+    print("\n  OPTIONAL AI (dual-model consensus)")
+    print("  " + "-" * 40)
+
+    ok, msg = await test_anthropic(os.getenv("ANTHROPIC_API_KEY", ""))
+    tag = PASS if ok is True else (SKIP if ok is None else FAIL)
+    print(f"{tag}  Anthropic / Claude  {msg}")
 
     # ── Optional keys ─────────────────────────────────────────
     print("\n  OPTIONAL (lean bot data enrichment)")

@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
+from src.clients.claude_client import ClaudeClient
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
 from src.config.settings import settings
@@ -104,10 +105,18 @@ class LeanDirectionalStrategy:
     """
     High-volume, category-filtered directional trading strategy.
 
+    Uses a dual-model consensus system:
+      1. Grok-3 (xAI)         — primary analysis, full JSON decision
+      2. Claude Opus 4.6      — secondary verification with adaptive thinking
+    Both models must agree before a position is opened.
+    If ``claude_client`` is not provided (or ANTHROPIC_API_KEY is absent),
+    the strategy falls back to Grok-3-only mode automatically.
+
     Args:
         db_manager:    Shared :class:`DatabaseManager` instance.
         kalshi_client: Shared :class:`KalshiClient` instance.
         xai_client:    Shared :class:`XAIClient` instance (Grok-3).
+        claude_client: Optional :class:`ClaudeClient` instance (Claude Opus 4.6).
     """
 
     def __init__(
@@ -115,10 +124,12 @@ class LeanDirectionalStrategy:
         db_manager: DatabaseManager,
         kalshi_client: KalshiClient,
         xai_client: XAIClient,
+        claude_client: Optional[ClaudeClient] = None,
     ) -> None:
         self.db_manager = db_manager
         self.kalshi_client = kalshi_client
         self.xai_client = xai_client
+        self.claude_client = claude_client
         self.scorer = MarketScorer()
         self.context_builder = MarketContextBuilder(
             odds_api_key=getattr(settings.api, "odds_api_key", ""),
@@ -370,6 +381,68 @@ class LeanDirectionalStrategy:
                 )
                 return None, cost
 
+            # ── Dual-model consensus: Claude Opus 4.6 second opinion ─────────
+            # Only run when ClaudeClient is available; fall back silently if not.
+            if self.claude_client and self.claude_client.available:
+                claude_prompt = (
+                    f"You are verifying a prediction-market trade recommendation.\n"
+                    f"Market: {market.title}\n"
+                    f"Category: {market.category}\n"
+                    f"Recommended side: {side}\n"
+                    f"Market price: {market_price:.2f} ({market_price * 100:.0f}¢)\n"
+                    f"Estimated fair value: {ai_probability:.2f} ({ai_probability * 100:.0f}¢)\n"
+                    f"Edge: {edge_result.edge:.1%}  |  Grok-3 confidence: {confidence:.1%}\n"
+                    + (f"Context: {real_context[:600]}\n" if real_context else "")
+                    + f"\nDo you agree this trade has a genuine edge? "
+                    f"Reply JSON only — no other text:\n"
+                    f'{{"verdict": "CONFIRM|REJECT", "confidence": 0.0-1.0, "reason": "one sentence"}}'
+                )
+                claude_text, claude_cost = await self.claude_client.get_trading_decision(
+                    prompt=claude_prompt,
+                    market_id=market.market_id,
+                )
+                cost += claude_cost
+
+                if claude_text:
+                    upper = claude_text.upper()
+                    if "REJECT" in upper and "CONFIRM" not in upper:
+                        # Claude disagrees — skip the trade
+                        logger.info(
+                            "Claude REJECTED lean trade",
+                            market=market.market_id,
+                            side=side,
+                            grok_conf=f"{confidence:.1%}",
+                            claude_reason=claude_text[:120],
+                        )
+                        await self.db_manager.record_market_analysis(
+                            market.market_id, "CLAUDE_REJECTED", confidence, cost,
+                            f"Claude rejected: {claude_text[:200]}"
+                        )
+                        return None, cost
+
+                    # Both agree — blend confidences (Claude 55%, Grok 45%)
+                    import re as _re
+                    nums = _re.findall(r"0\.\d+", claude_text)
+                    claude_conf = float(nums[0]) if nums else confidence
+                    blended_conf = 0.55 * claude_conf + 0.45 * confidence
+                    logger.info(
+                        "Claude CONFIRMED lean trade",
+                        market=market.market_id,
+                        side=side,
+                        grok_conf=f"{confidence:.1%}",
+                        claude_conf=f"{claude_conf:.1%}",
+                        blended=f"{blended_conf:.1%}",
+                    )
+                    confidence = blended_conf   # use blended confidence going forward
+                    rationale = f"[Dual-model consensus] {rationale}"
+                else:
+                    # Claude unavailable this call — proceed on Grok alone
+                    logger.debug(
+                        "Claude returned no response for %s — using Grok-only",
+                        market.market_id,
+                    )
+            # ─────────────────────────────────────────────────────────────────
+
             await self.db_manager.record_market_analysis(
                 market.market_id, "BUY", confidence, cost, rationale
             )
@@ -506,6 +579,7 @@ async def run_lean_directional(
     kalshi_client: KalshiClient,
     xai_client: XAIClient,
     total_capital: float,
+    claude_client: Optional[ClaudeClient] = None,
 ) -> Dict:
     """
     Run one cycle of the lean directional strategy.
@@ -515,11 +589,12 @@ async def run_lean_directional(
         kalshi_client: Shared Kalshi REST client.
         xai_client:    Shared xAI client.
         total_capital: Capital available for deployment.
+        claude_client: Optional Claude client for dual-model consensus.
 
     Returns:
         Result dict with positions created, AI cost, and capital deployed.
     """
-    strategy = LeanDirectionalStrategy(db_manager, kalshi_client, xai_client)
+    strategy = LeanDirectionalStrategy(db_manager, kalshi_client, xai_client, claude_client)
     result = await strategy.run(total_capital)
     return {
         "positions_created": result.positions_created,

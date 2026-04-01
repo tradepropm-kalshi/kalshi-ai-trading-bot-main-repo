@@ -16,6 +16,7 @@ class APIConfig:
     kalshi_api_key: str = field(default_factory=lambda: os.getenv("KALSHI_API_KEY", ""))
     kalshi_base_url: str = "https://api.elections.kalshi.com"
     xai_api_key: str = field(default_factory=lambda: os.getenv("XAI_API_KEY", ""))
+    anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
 
     # ── Free real-world data API keys (lean bot enrichment) ───────────────────
     odds_api_key: str = field(default_factory=lambda: os.getenv("ODDS_API_KEY", ""))

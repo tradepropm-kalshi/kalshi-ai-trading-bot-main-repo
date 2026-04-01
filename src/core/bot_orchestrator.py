@@ -36,6 +36,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from src.clients.claude_client import ClaudeClient
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
 from src.config.settings import settings
@@ -99,6 +100,7 @@ class BotOrchestrator:
         self._db: Optional[DatabaseManager] = None
         self._kalshi: Optional[KalshiClient] = None
         self._xai: Optional[XAIClient] = None
+        self._claude: Optional[ClaudeClient] = None
 
         # Order-flow components (Beast Mode primary engine)
         self._trade_feed: Optional[KalshiTradeFeed] = None
@@ -129,6 +131,16 @@ class BotOrchestrator:
 
         self._kalshi = KalshiClient()
         self._xai = XAIClient(db_manager=self._db)
+
+        # Initialise Claude client (optional — degrades gracefully if key absent)
+        self._claude = ClaudeClient(
+            api_key=settings.api.anthropic_api_key,
+            db_manager=self._db,
+        )
+        if self._claude.available:
+            logger.info("Claude dual-model consensus ENABLED (Opus 4.6 + Haiku 4.5)")
+        else:
+            logger.info("Claude not configured — running in Grok-only mode")
 
         # Initialise order-flow scanner (runs regardless of beast toggle so
         # the feed is warm and has baseline velocity data when beast starts)
@@ -263,6 +275,7 @@ class BotOrchestrator:
             kalshi=self._kalshi,
             xai=self._xai,
             feed=self._trade_feed,
+            claude=self._claude,
             live=self.state.beast_live,
             position_cap=BEAST_MAX_POSITIONS,
         )
@@ -341,6 +354,7 @@ class BotOrchestrator:
                     kalshi_client=self._kalshi,
                     xai_client=self._xai,
                     total_capital=capital,
+                    claude_client=self._claude,
                 )
 
                 ai_cost = await self._db.get_daily_ai_cost()
@@ -455,6 +469,11 @@ class BotOrchestrator:
         if self._trade_feed:
             try:
                 await self._trade_feed.stop()
+            except Exception:
+                pass
+        if self._claude:
+            try:
+                await self._claude.close()
             except Exception:
                 pass
         if self._kalshi:
