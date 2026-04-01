@@ -13,19 +13,25 @@ echo.
 REM ── Find a working Python ────────────────────────────────────────────────────
 set PYTHON=
 
-REM 1. Try virtual environment first (fastest, has all dependencies)
-if exist ".venv\Scripts\python.exe" (
-    .venv\Scripts\python.exe --version >nul 2>&1
-    if !errorlevel! == 0 ( set PYTHON=.venv\Scripts\python.exe )
+REM 1. Try py -3.12 first (installed version)
+py -3.12 --version >nul 2>&1
+if !errorlevel! == 0 ( set PYTHON=py -3.12 )
+
+REM 2. Try virtual environment
+if "!PYTHON!"=="" (
+    if exist ".venv\Scripts\python.exe" (
+        .venv\Scripts\python.exe --version >nul 2>&1
+        if !errorlevel! == 0 ( set PYTHON=.venv\Scripts\python.exe )
+    )
 )
-if exist "venv\Scripts\python.exe" (
-    if "!PYTHON!"=="" (
+if "!PYTHON!"=="" (
+    if exist "venv\Scripts\python.exe" (
         venv\Scripts\python.exe --version >nul 2>&1
         if !errorlevel! == 0 ( set PYTHON=venv\Scripts\python.exe )
     )
 )
 
-REM 2. Fall back to system Python
+REM 3. Fall back to system Python
 if "!PYTHON!"=="" (
     python --version >nul 2>&1
     if !errorlevel! == 0 ( set PYTHON=python )
