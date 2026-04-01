@@ -1,0 +1,41 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Beast Mode Bot (live trading)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["beast_mode_bot.py", "--mode", "live"],
+      "port": 0
+    },
+    {
+      "name": "Beast Mode Bot (paper trading)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["beast_mode_bot.py", "--mode", "paper"],
+      "port": 0
+    },
+    {
+      "name": "Paper Trader (signal loop)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["paper_trader.py", "--loop"],
+      "port": 0
+    },
+    {
+      "name": "Beast Mode Dashboard (console)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["beast_mode_dashboard.py"],
+      "port": 0
+    },
+    {
+      "name": "Streamlit Web Dashboard",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "streamlit", "run", "streamlit_dashboard.py"],
+      "port": 8501
+    },
+    {
+      "name": "CLI",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["cli.py"],
+      "port": 0
+    }
+  ]
+}

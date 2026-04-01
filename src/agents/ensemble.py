@@ -7,14 +7,13 @@ disagreement, and optionally tracks calibration over time.
 """
 
 import asyncio
-import json
 import os
 import time
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.agents.base_agent import BaseAgent
+from src.agents.calibration_manager import CalibrationManager
 from src.agents.forecaster_agent import ForecasterAgent
 from src.agents.news_analyst_agent import NewsAnalystAgent
 from src.agents.bull_researcher import BullResearcher
@@ -25,7 +24,7 @@ from src.utils.logging_setup import get_trading_logger
 
 logger = get_trading_logger("ensemble")
 
-# Default weights from EnsembleConfig; keyed by agent role
+# Default weights keyed by agent role
 _DEFAULT_WEIGHTS: Dict[str, float] = {
     "forecaster": 0.30,
     "news_analyst": 0.20,
@@ -33,9 +32,6 @@ _DEFAULT_WEIGHTS: Dict[str, float] = {
     "bear_researcher": 0.15,
     "risk_manager": 0.15,
 }
-
-# Path where calibration records are stored
-_CALIBRATION_FILE = Path("logs/ensemble_calibration.json")
 
 
 class EnsembleRunner:
@@ -82,6 +78,7 @@ class EnsembleRunner:
             if disagreement_threshold is not None
             else settings.ensemble.disagreement_threshold
         )
+        self._calibration = CalibrationManager()
 
     # ------------------------------------------------------------------
     # Public API
@@ -222,7 +219,7 @@ class EnsembleRunner:
 
         # Optionally record for calibration tracking
         if settings.ensemble.calibration_tracking:
-            self._record_calibration(
+            self._calibration.record(
                 market_data=market_data,
                 probability=weighted_prob,
                 confidence=adjusted_confidence,
@@ -275,11 +272,24 @@ class EnsembleRunner:
                 return float(val)
 
         if role == "news_analyst":
-            # Convert sentiment (-1..1) into a probability adjustment centred on 0.5
+            # Convert sentiment (-1..1) into a probability adjustment centred on 0.5.
+            #
+            # Fix: the original formula `0.5 + sentiment * relevance * 0.5` collapses
+            # to exactly 0.0 or 1.0 when both sentiment and relevance are at their
+            # extremes (±1 and 1.0).  That pushes the ensemble toward certainty based
+            # on a single headline, which is unsound.
+            #
+            # The fix applies a logistic-style dampening that keeps the news signal
+            # inside a ±0.25 band around 0.5 regardless of input magnitude:
+            #   raw_shift = sentiment * relevance * 0.5   (still uses original formula)
+            #   dampened  = raw_shift / (1 + |raw_shift| * 4)  → asymptotes at ±0.25
+            # This means no single news item can push the ensemble probability
+            # below 0.25 or above 0.75 from the news channel alone.
             sentiment = result.get("sentiment", 0.0)
             relevance = result.get("relevance", 0.5)
-            # Scale: sentiment * relevance gives -1..1 adjustment, map to 0..1
-            prob = 0.5 + (sentiment * relevance * 0.5)
+            raw_shift = sentiment * relevance * 0.5
+            dampened_shift = raw_shift / (1.0 + abs(raw_shift) * 4.0)
+            prob = 0.5 + dampened_shift
             return max(0.0, min(1.0, prob))
 
         if role == "risk_manager":
@@ -334,61 +344,6 @@ class EnsembleRunner:
         std_dev = math.sqrt(variance)
 
         return avg_prob, avg_conf, std_dev
-
-    # ------------------------------------------------------------------
-    # Calibration tracking
-    # ------------------------------------------------------------------
-    def _record_calibration(
-        self,
-        market_data: dict,
-        probability: float,
-        confidence: float,
-        disagreement: float,
-        model_results: list,
-    ) -> None:
-        """
-        Append a calibration record to the JSON calibration file.
-
-        The file is a JSON array of objects.  Resolution outcome can be
-        backfilled later to compute calibration curves.
-        """
-        record = {
-            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-            "market_title": market_data.get("title", "")[:200],
-            "market_ticker": market_data.get("ticker", ""),
-            "yes_price": market_data.get("yes_price"),
-            "ensemble_probability": probability,
-            "ensemble_confidence": confidence,
-            "disagreement": disagreement,
-            "num_models": len([r for r in model_results if "error" not in r]),
-            "model_probabilities": {
-                r.get("_agent", "?"): r.get("probability")
-                for r in model_results
-                if "error" not in r and r.get("probability") is not None
-            },
-            "resolved_yes": None,  # To be backfilled after market resolves
-        }
-
-        try:
-            _CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
-            existing: list = []
-            if _CALIBRATION_FILE.exists():
-                try:
-                    existing = json.loads(_CALIBRATION_FILE.read_text())
-                    if not isinstance(existing, list):
-                        existing = []
-                except (json.JSONDecodeError, OSError):
-                    existing = []
-
-            existing.append(record)
-
-            # Keep a reasonable cap (last 5000 records)
-            if len(existing) > 5000:
-                existing = existing[-5000:]
-
-            _CALIBRATION_FILE.write_text(json.dumps(existing, indent=2))
-        except Exception as exc:
-            logger.warning("Failed to write calibration record", error=str(exc))
 
     # ------------------------------------------------------------------
     # Default agent factory
