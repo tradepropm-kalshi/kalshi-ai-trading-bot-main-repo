@@ -209,3 +209,4 @@ secrets.yaml
 *.pem
 *.key
 .env*
+!.env.template
